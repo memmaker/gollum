@@ -1,4 +1,4 @@
-module gollum
+module github.com/memmaker/gollum
 
 go 1.21
 
