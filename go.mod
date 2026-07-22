@@ -1,4 +1,4 @@
-module go-llm
+module gollum
 
 go 1.21
 
