@@ -10,8 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"go-llm/llm"
-	rec_files "go-llm/rec-files"
+    "go-llm/llm"
 )
 
 func main() {
@@ -21,124 +20,16 @@ func main() {
 
 	ctx := context.Background()
 
-	// Ensure config exists under ~/.config/gollum/config.rec
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: cannot determine home directory:", err)
-		os.Exit(1)
-	}
-	cfgDir := filepath.Join(home, ".config", "gollum")
-	cfgPath := filepath.Join(cfgDir, "config.rec")
+    client, cfgModel, systemPrompt, err := llm.InitClientFromHome()
+    if err != nil {
+        fmt.Fprintln(os.Stderr, "error initializing client:", err)
+        os.Exit(1)
+    }
 
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		if err := os.MkdirAll(cfgDir, 0700); err != nil {
-			fmt.Fprintln(os.Stderr, "error creating config dir:", err)
-			os.Exit(1)
-		}
-		f, err := os.Create(cfgPath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "error creating config file:", err)
-			os.Exit(1)
-		}
-		// default config
-		recs := []rec_files.Record{
-			{
-				{Name: "provider", Value: "openai"},
-				{Name: "model", Value: "gpt-5-mini"},
-			},
-		}
-		if err := rec_files.Write(f, recs); err != nil {
-			fmt.Fprintln(os.Stderr, "error writing config file:", err)
-			f.Close()
-			os.Exit(1)
-		}
-		f.Close()
-	}
-
-	// Read config
-	cfgFile, err := os.Open(cfgPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error opening config file:", err)
-		os.Exit(1)
-	}
-	recs := rec_files.Read(cfgFile)
-	cfgFile.Close()
-
-	provider := "openai"
-	cfgModel := ""
-	if len(recs) > 0 {
-		m := recs[0].ToMap()
-		if v, ok := m["provider"]; ok && v != "" {
-			provider = v
-		}
-		if v, ok := m["model"]; ok && v != "" {
-			cfgModel = v
-		}
-	}
-
-	// Determine API key from env according to provider
-	var apiKey string
-	switch provider {
-	case "openai":
-		apiKey = os.Getenv("OPENAI_API_KEY")
-		if apiKey == "" {
-			apiKey = os.Getenv("OPENAI_API_TOKEN")
-		}
-	case "huggingface":
-		apiKey = os.Getenv("HUGGINGFACE_API_KEY")
-		if apiKey == "" {
-			apiKey = os.Getenv("HF_API_KEY")
-		}
-	case "copilot":
-		apiKey = os.Getenv("GITHUB_TOKEN")
-		if apiKey == "" {
-			apiKey = os.Getenv("COPILOT_TOKEN")
-		}
-	case "gemini":
-		apiKey = os.Getenv("GEMINI_API_KEY")
-		if apiKey == "" {
-			apiKey = os.Getenv("GOOGLE_API_KEY")
-		}
-	default:
-		apiKey = os.Getenv("OPENAI_API_KEY")
-		if apiKey == "" {
-			apiKey = os.Getenv("OPENAI_API_TOKEN")
-		}
-	}
-
-	var client *llm.Client
-	if apiKey == "" {
-		// If the config specifies a provider, require its API key in env
-		var hint string
-		switch provider {
-		case "openai":
-			hint = "OPENAI_API_KEY or OPENAI_API_TOKEN"
-		case "huggingface":
-			hint = "HUGGINGFACE_API_KEY or HF_API_KEY"
-		case "copilot":
-			hint = "GITHUB_TOKEN or COPILOT_TOKEN"
-		case "gemini":
-			hint = "GEMINI_API_KEY or GOOGLE_API_KEY"
-		default:
-			hint = "OPENAI_API_KEY or OPENAI_API_TOKEN"
-		}
-		fmt.Fprintln(os.Stderr, "error: no API key found for provider", provider)
-		fmt.Fprintln(os.Stderr, "Set the provider API key in the environment (e.g.", hint+")")
-		os.Exit(1)
-	}
-
-	client, err = llm.New(llm.Config{Provider: provider, APIKey: apiKey, Model: cfgModel})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error creating client from config:", err)
-		os.Exit(1)
-	}
-
-	// read system prompt from ~/.config/gollum/system.md if present
-	systemPath := filepath.Join(home, ".config", "gollum", "system.md")
-	var systemPrompt string
-	if b, err := os.ReadFile(systemPath); err == nil {
-		systemPrompt = string(b)
-	}
+    // If no model was provided on the command line, prefer the configured model
+    if *model == "" {
+        *model = cfgModel
+    }
 
 	if *interactive {
 		runInteractive(ctx, client, *model, systemPrompt)
