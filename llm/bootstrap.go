@@ -5,7 +5,7 @@ import (
     "os"
     "path/filepath"
 
-    rec_files "go-llm/rec-files"
+    rec_files "gollum/rec-files"
 )
 
 // InitClientFromHome reads ~/.config/gollum/config.rec and system.md and
