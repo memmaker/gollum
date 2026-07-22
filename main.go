@@ -4,13 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/memmaker/gollum/llm"
 	"github.com/peterh/liner"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-
-    "gollum/llm"
 )
 
 func main() {
@@ -20,16 +19,16 @@ func main() {
 
 	ctx := context.Background()
 
-    client, cfgModel, systemPrompt, err := llm.InitClientFromHome()
-    if err != nil {
-        fmt.Fprintln(os.Stderr, "error initializing client:", err)
-        os.Exit(1)
-    }
+	client, cfgModel, systemPrompt, err := llm.InitClientFromHome()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error initializing client:", err)
+		os.Exit(1)
+	}
 
-    // If no model was provided on the command line, prefer the configured model
-    if *model == "" {
-        *model = cfgModel
-    }
+	// If no model was provided on the command line, prefer the configured model
+	if *model == "" {
+		*model = cfgModel
+	}
 
 	if *interactive {
 		runInteractive(ctx, client, *model, systemPrompt)
