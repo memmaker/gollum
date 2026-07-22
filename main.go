@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-    "go-llm/llm"
+    "gollum/llm"
 )
 
 func main() {
