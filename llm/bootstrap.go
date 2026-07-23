@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	rec_files "github.com/memmaker/gollum/rec-files"
 )
@@ -96,7 +97,7 @@ func InitClientFromHome() (*Client, string, string, error) {
 	// Try reading API key from .apikey file in current working directory
 	if apiKey == "" {
 		if b, err := os.ReadFile(".apikey"); err == nil {
-			apiKey = string(b)
+			apiKey = strings.TrimSpace(string(b))
 		}
 	}
 
