@@ -9,8 +9,9 @@ import (
 	rec_files "github.com/memmaker/gollum/rec-files"
 )
 
-// InitClientFromHome reads ~/.config/gollum/config.rec and system.md and
-// returns a configured Client, the configured model (may be empty), and the
+// InitClientFromHome reads llm_model.rec from the current directory if present,
+// otherwise reads ~/.config/gollum/config.rec. Also reads system.md from home directory.
+// Returns a configured Client, the configured model (may be empty), and the
 // system prompt (may be empty). If no API key is found for the configured
 // provider, an error is returned.
 func InitClientFromHome() (*Client, string, string, error) {
@@ -18,39 +19,56 @@ func InitClientFromHome() (*Client, string, string, error) {
 	if err != nil {
 		return nil, "", "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	cfgDir := filepath.Join(home, ".config", "gollum")
-	cfgPath := filepath.Join(cfgDir, "config.rec")
 
-	// ensure config exists
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		if err := os.MkdirAll(cfgDir, 0700); err != nil {
-			return nil, "", "", fmt.Errorf("error creating config dir: %w", err)
-		}
-		f, err := os.Create(cfgPath)
+	// Check for local llm_model.rec in current working directory first
+	var cfgPath string
+	var recs []rec_files.Record
+
+	if _, err := os.Stat("llm_model.rec"); err == nil {
+		// Local config exists, use it
+		cfgPath = "llm_model.rec"
+		cfgFile, err := os.Open(cfgPath)
 		if err != nil {
-			return nil, "", "", fmt.Errorf("error creating config file: %w", err)
+			return nil, "", "", fmt.Errorf("error opening local config file: %w", err)
 		}
-		// default config
-		recs := []rec_files.Record{
-			{
-				{Name: "provider", Value: "openai"},
-				{Name: "model", Value: "gpt-5-mini"},
-			},
-		}
-		if err := rec_files.Write(f, recs); err != nil {
-			f.Close()
-			return nil, "", "", fmt.Errorf("error writing config: %w", err)
-		}
-		f.Close()
-	}
+		recs = rec_files.Read(cfgFile)
+		cfgFile.Close()
+	} else {
+		// Fall back to global config
+		cfgDir := filepath.Join(home, ".config", "gollum")
+		cfgPath = filepath.Join(cfgDir, "config.rec")
 
-	// Read config
-	cfgFile, err := os.Open(cfgPath)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("error opening config file: %w", err)
+		// ensure config exists
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+			if err := os.MkdirAll(cfgDir, 0700); err != nil {
+				return nil, "", "", fmt.Errorf("error creating config dir: %w", err)
+			}
+			f, err := os.Create(cfgPath)
+			if err != nil {
+				return nil, "", "", fmt.Errorf("error creating config file: %w", err)
+			}
+			// default config
+			defaultRecs := []rec_files.Record{
+				{
+					{Name: "provider", Value: "openai"},
+					{Name: "model", Value: "gpt-5-mini"},
+				},
+			}
+			if err := rec_files.Write(f, defaultRecs); err != nil {
+				f.Close()
+				return nil, "", "", fmt.Errorf("error writing config: %w", err)
+			}
+			f.Close()
+		}
+
+		// Read global config
+		cfgFile, err := os.Open(cfgPath)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("error opening config file: %w", err)
+		}
+		recs = rec_files.Read(cfgFile)
+		cfgFile.Close()
 	}
-	recs := rec_files.Read(cfgFile)
-	cfgFile.Close()
 
 	provider := "openai"
 	cfgModel := ""
