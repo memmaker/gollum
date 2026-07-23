@@ -58,9 +58,22 @@ type oaChunkChoice struct {
 }
 
 type oaDelta struct {
-	Role         string          `json:"role,omitempty"`
-	Content      string          `json:"content,omitempty"`
+	Role      string           `json:"role,omitempty"`
+	Content   string           `json:"content,omitempty"`
+	ToolCalls []oaToolCall     `json:"tool_calls,omitempty"`
 	FunctionCall *oaFunctionCall `json:"function_call,omitempty"`
+}
+
+type oaToolCall struct {
+	Index    int                `json:"index,omitempty"`
+	ID       string             `json:"id,omitempty"`
+	Type     string             `json:"type,omitempty"`
+	Function oaToolCallFunction `json:"function,omitempty"`
+}
+
+type oaToolCallFunction struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 type oaFunctionCall struct {
@@ -158,12 +171,13 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 	}
 
 	ch := make(chan Message)
-	// state per choice index: accumulate role, content, function call name/args
+	// state per choice index: accumulate role, content, function call name/args, tool calls
 	type partial struct {
-		role    string
-		content strings.Builder
-		fnName  string
-		fnArgs  strings.Builder
+		role      string
+		content   strings.Builder
+		fnName    string
+		fnArgs    strings.Builder
+		toolCalls map[int]*oaToolCall
 	}
 	parts := make(map[int]*partial)
 
@@ -216,7 +230,29 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 						return
 					}
 				}
-				// function call pieces
+				// new tool_calls format (OpenAI November 2024+)
+				if len(c.Delta.ToolCalls) > 0 {
+					if p.toolCalls == nil {
+						p.toolCalls = make(map[int]*oaToolCall)
+					}
+					for _, tc := range c.Delta.ToolCalls {
+						idx := tc.Index
+						if _, exists := p.toolCalls[idx]; !exists {
+							p.toolCalls[idx] = &oaToolCall{
+								Index: idx,
+								ID:    tc.ID,
+								Type:  tc.Type,
+							}
+						}
+						if tc.Function.Name != "" {
+							p.toolCalls[idx].Function.Name = tc.Function.Name
+						}
+						if tc.Function.Arguments != "" {
+							p.toolCalls[idx].Function.Arguments += tc.Function.Arguments
+						}
+					}
+				}
+				// legacy function_call format (deprecated but still supported)
 				if c.Delta.FunctionCall != nil {
 					if c.Delta.FunctionCall.Name != "" {
 						p.fnName = c.Delta.FunctionCall.Name
@@ -225,10 +261,31 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 						p.fnArgs.WriteString(c.Delta.FunctionCall.Arguments)
 					}
 				}
-				// finish reason: if function_call completed, emit a tool-call message
+				// finish reason: if tool_call/function_call completed, emit a tool-call message
 				if c.FinishReason != "" {
-					if c.FinishReason == "function_call" || p.fnName != "" {
-						// assemble ToolCall
+					// Handle new tool_calls format
+					if c.FinishReason == "tool_calls" && p.toolCalls != nil {
+						var toolCalls []ToolCall
+						for _, tc := range p.toolCalls {
+							toolCalls = append(toolCalls, ToolCall{
+								ID:   tc.ID,
+								Type: tc.Type,
+								Function: ToolCallFunction{
+									Name:      tc.Function.Name,
+									Arguments: tc.Function.Arguments,
+								},
+							})
+						}
+						if len(toolCalls) > 0 {
+							select {
+							case ch <- Message{Role: RoleAssistant, ToolCalls: toolCalls}:
+							case <-ctx.Done():
+								return
+							}
+						}
+						delete(parts, c.Index)
+					} else if (c.FinishReason == "function_call" || p.fnName != "") && c.FinishReason != "tool_calls" {
+						// Handle legacy function_call format
 						tc := ToolCall{
 							ID:   fmt.Sprintf("oa-fc-%d", c.Index),
 							Type: "function",
@@ -237,13 +294,11 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 								Arguments: p.fnArgs.String(),
 							},
 						}
-						// send a message that contains the tool call (no content)
 						select {
 						case ch <- Message{Role: RoleAssistant, ToolCalls: []ToolCall{tc}}:
 						case <-ctx.Done():
 							return
 						}
-						// reset partial for this index to free memory
 						delete(parts, c.Index)
 					}
 				}
