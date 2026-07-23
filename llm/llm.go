@@ -95,6 +95,8 @@ func New(cfg Config) (*Client, error) {
 		p = newOpenAIProvider(cfg)
 	case "gemini":
 		p = newGeminiProvider(cfg)
+	case "lmstudio":
+		p = newLMStudioProvider(cfg)
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q", cfg.Provider)
 	}
