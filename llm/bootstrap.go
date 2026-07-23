@@ -93,8 +93,15 @@ func InitClientFromHome() (*Client, string, string, error) {
 		}
 	}
 
+	// Try reading API key from .apikey file in current working directory
 	if apiKey == "" {
-		return nil, "", "", fmt.Errorf("no API key found for provider %s; set the provider API key in the environment", provider)
+		if b, err := os.ReadFile(".apikey"); err == nil {
+			apiKey = string(b)
+		}
+	}
+
+	if apiKey == "" {
+		return nil, "", "", fmt.Errorf("no API key found for provider %s; set the provider API key in the environment or create a .apikey file in the current directory", provider)
 	}
 
 	client, err := New(Config{Provider: provider, APIKey: apiKey, Model: cfgModel})
