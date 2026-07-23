@@ -54,6 +54,7 @@ func InitClientFromHome() (*Client, string, string, error) {
 
 	provider := "openai"
 	cfgModel := ""
+	cfgBaseURL := ""
 	if len(recs) > 0 {
 		m := recs[0].ToMap()
 		if v, ok := m["provider"]; ok && v != "" {
@@ -61,6 +62,9 @@ func InitClientFromHome() (*Client, string, string, error) {
 		}
 		if v, ok := m["model"]; ok && v != "" {
 			cfgModel = v
+		}
+		if v, ok := m["base_url"]; ok && v != "" {
+			cfgBaseURL = v
 		}
 	}
 
@@ -87,6 +91,8 @@ func InitClientFromHome() (*Client, string, string, error) {
 		if apiKey == "" {
 			apiKey = os.Getenv("GOOGLE_API_KEY")
 		}
+	case "lmstudio":
+		apiKey = os.Getenv("LMSTUDIO_API_KEY")
 	default:
 		apiKey = os.Getenv("OPENAI_API_KEY")
 		if apiKey == "" {
@@ -101,11 +107,12 @@ func InitClientFromHome() (*Client, string, string, error) {
 		}
 	}
 
-	if apiKey == "" {
+	// API key is optional for lmstudio (local service)
+	if apiKey == "" && provider != "lmstudio" {
 		return nil, "", "", fmt.Errorf("no API key found for provider %s; set the provider API key in the environment or create a .apikey file in the current directory", provider)
 	}
 
-	client, err := New(Config{Provider: provider, APIKey: apiKey, Model: cfgModel})
+	client, err := New(Config{Provider: provider, APIKey: apiKey, Model: cfgModel, BaseURL: cfgBaseURL})
 	if err != nil {
 		return nil, "", "", err
 	}
