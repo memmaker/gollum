@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -282,8 +283,19 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 				if c.FinishReason != "" {
 					// Handle new tool_calls format
 					if c.FinishReason == "tool_calls" && p.toolCalls != nil {
+						// Deltas are accumulated by index, and ranging a map
+						// would hand the caller the calls in random order.
+						// Callers rely on the model's own ordering, so replay
+						// it by index.
+						indices := make([]int, 0, len(p.toolCalls))
+						for idx := range p.toolCalls {
+							indices = append(indices, idx)
+						}
+						sort.Ints(indices)
+
 						var toolCalls []ToolCall
-						for _, tc := range p.toolCalls {
+						for _, idx := range indices {
+							tc := p.toolCalls[idx]
 							toolCalls = append(toolCalls, ToolCall{
 								ID:   tc.ID,
 								Type: tc.Type,
