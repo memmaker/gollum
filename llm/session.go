@@ -8,13 +8,14 @@ import (
 type ToolExecutor func(ctx context.Context, call ToolCall) (string, error)
 
 type Session struct {
-	client    *Client
-	messages  []Message
-	Model     string
-	Temp      float64
-	MaxTokens int
-	tools     []Tool
-	executors map[string]ToolExecutor
+	client          *Client
+	messages        []Message
+	Model           string
+	Temp            float64
+	MaxTokens       int
+	ReasoningEffort ReasoningEffort
+	tools           []Tool
+	executors       map[string]ToolExecutor
 }
 
 func NewSession(client *Client, systemPrompt string) *Session {
@@ -33,10 +34,11 @@ func NewSession(client *Client, systemPrompt string) *Session {
 func (s *Session) Send(ctx context.Context, prompt string) (Response, error) {
 	userMsg := Message{Role: RoleUser, Content: prompt}
 	req := Request{
-		Messages:    append(append([]Message{}, s.messages...), userMsg),
-		Model:       s.Model,
-		Temperature: s.Temp,
-		MaxTokens:   s.MaxTokens,
+		Messages:        append(append([]Message{}, s.messages...), userMsg),
+		Model:           s.Model,
+		Temperature:     s.Temp,
+		MaxTokens:       s.MaxTokens,
+		ReasoningEffort: s.ReasoningEffort,
 	}
 	resp, err := s.client.Chat(ctx, req)
 	if err != nil {
@@ -49,10 +51,11 @@ func (s *Session) Send(ctx context.Context, prompt string) (Response, error) {
 func (s *Session) Stream(ctx context.Context, prompt string) (<-chan Message, error) {
 	userMsg := Message{Role: RoleUser, Content: prompt}
 	req := Request{
-		Messages:    append(append([]Message{}, s.messages...), userMsg),
-		Model:       s.Model,
-		Temperature: s.Temp,
-		MaxTokens:   s.MaxTokens,
+		Messages:        append(append([]Message{}, s.messages...), userMsg),
+		Model:           s.Model,
+		Temperature:     s.Temp,
+		MaxTokens:       s.MaxTokens,
+		ReasoningEffort: s.ReasoningEffort,
 	}
 	innerCh, err := s.client.Stream(ctx, req)
 	if err != nil {
@@ -87,11 +90,12 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 
 		for {
 			req := Request{
-				Messages:    msgs,
-				Model:       s.Model,
-				Temperature: s.Temp,
-				MaxTokens:   s.MaxTokens,
-				Tools:       s.tools,
+				Messages:        msgs,
+				Model:           s.Model,
+				Temperature:     s.Temp,
+				MaxTokens:       s.MaxTokens,
+				Tools:           s.tools,
+				ReasoningEffort: s.ReasoningEffort,
 			}
 
 			// use a cancellable child context so we can stop a stream when a tool call appears
@@ -176,11 +180,12 @@ func (s *Session) SendWithTools(ctx context.Context, prompt string, userTools []
 
 	for {
 		req := Request{
-			Messages:    msgs,
-			Model:       s.Model,
-			Temperature: s.Temp,
-			MaxTokens:   s.MaxTokens,
-			Tools:       allTools,
+			Messages:        msgs,
+			Model:           s.Model,
+			Temperature:     s.Temp,
+			MaxTokens:       s.MaxTokens,
+			Tools:           allTools,
+			ReasoningEffort: s.ReasoningEffort,
 		}
 		resp, err := s.client.Chat(ctx, req)
 		if err != nil {

@@ -78,8 +78,32 @@ type geminiFunctionResponse struct {
 }
 
 type geminiConfig struct {
-	Temperature     float64 `json:"temperature,omitempty"`
-	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	Temperature     float64               `json:"temperature,omitempty"`
+	MaxOutputTokens int                   `json:"maxOutputTokens,omitempty"`
+	ThinkingConfig  *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+type geminiThinkingConfig struct {
+	ThinkingBudget int `json:"thinkingBudget"`
+}
+
+// geminiThinkingBudget maps our provider-agnostic enum to a Gemini thinking
+// token budget. Gemini has no named tiers, only a budget in tokens (0 disables
+// thinking entirely; -1 lets the model decide dynamically), so Low/Medium/High
+// are approximated with fixed budgets rather than exact equivalents.
+func geminiThinkingBudget(e ReasoningEffort) *geminiThinkingConfig {
+	switch e {
+	case ReasoningEffortNone:
+		return &geminiThinkingConfig{ThinkingBudget: 0}
+	case ReasoningEffortLow:
+		return &geminiThinkingConfig{ThinkingBudget: 1024}
+	case ReasoningEffortMedium:
+		return &geminiThinkingConfig{ThinkingBudget: 8192}
+	case ReasoningEffortHigh:
+		return &geminiThinkingConfig{ThinkingBudget: -1}
+	default:
+		return nil
+	}
 }
 
 type geminiTool struct {
@@ -180,6 +204,7 @@ func buildGeminiReq(req Request) geminiReq {
 		GenerationConfig: geminiConfig{
 			Temperature:     req.Temperature,
 			MaxOutputTokens: req.MaxTokens,
+			ThinkingConfig:  geminiThinkingBudget(req.ReasoningEffort),
 		},
 	}
 

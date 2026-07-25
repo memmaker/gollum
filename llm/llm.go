@@ -49,12 +49,27 @@ type ToolFunction struct {
 	Parameters  any    `json:"parameters"`
 }
 
+// ReasoningEffort selects how much internal reasoning a model should do
+// before answering. Support and exact meaning vary by provider/model:
+// OpenAI-compatible backends (openai, copilot, lmstudio, huggingface) map
+// this to the `reasoning_effort` field; Gemini maps it to a thinking token
+// budget. Leave it empty to use the provider/model default.
+type ReasoningEffort string
+
+const (
+	ReasoningEffortNone   ReasoningEffort = "none"
+	ReasoningEffortLow    ReasoningEffort = "low"
+	ReasoningEffortMedium ReasoningEffort = "medium"
+	ReasoningEffortHigh   ReasoningEffort = "high"
+)
+
 type Request struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Tools       []Tool    `json:"tools,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []Message       `json:"messages"`
+	Temperature     float64         `json:"temperature,omitempty"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
+	Tools           []Tool          `json:"tools,omitempty"`
+	ReasoningEffort ReasoningEffort `json:"reasoning_effort,omitempty"`
 }
 
 type Response struct {

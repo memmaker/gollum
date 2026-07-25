@@ -18,12 +18,27 @@ type openaiTransport struct {
 }
 
 type openaiReq struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Stream      bool      `json:"stream,omitempty"`
-	Tools       []Tool    `json:"tools,omitempty"`
+	Model           string    `json:"model"`
+	Messages        []Message `json:"messages"`
+	Temperature     float64   `json:"temperature,omitempty"`
+	MaxTokens       int       `json:"max_tokens,omitempty"`
+	Stream          bool      `json:"stream,omitempty"`
+	Tools           []Tool    `json:"tools,omitempty"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+}
+
+// openaiReasoningEffort maps our provider-agnostic enum to the values OpenAI's
+// API accepts. OpenAI has no literal "off" for reasoning models, so None maps
+// to "minimal", the lowest level that still works across current models.
+func openaiReasoningEffort(e ReasoningEffort) string {
+	switch e {
+	case ReasoningEffortNone:
+		return "minimal"
+	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh:
+		return string(e)
+	default:
+		return ""
+	}
 }
 
 type openaiResp struct {
@@ -58,9 +73,9 @@ type oaChunkChoice struct {
 }
 
 type oaDelta struct {
-	Role      string           `json:"role,omitempty"`
-	Content   string           `json:"content,omitempty"`
-	ToolCalls []oaToolCall     `json:"tool_calls,omitempty"`
+	Role         string          `json:"role,omitempty"`
+	Content      string          `json:"content,omitempty"`
+	ToolCalls    []oaToolCall    `json:"tool_calls,omitempty"`
 	FunctionCall *oaFunctionCall `json:"function_call,omitempty"`
 }
 
@@ -90,11 +105,12 @@ func newOpenAITransport(apiKey string) *openaiTransport {
 
 func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Response, error) {
 	body := openaiReq{
-		Model:       req.Model,
-		Messages:    req.Messages,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Tools:       req.Tools,
+		Model:           req.Model,
+		Messages:        req.Messages,
+		Temperature:     req.Temperature,
+		MaxTokens:       req.MaxTokens,
+		Tools:           req.Tools,
+		ReasoningEffort: openaiReasoningEffort(req.ReasoningEffort),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -140,12 +156,13 @@ func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Re
 
 func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (<-chan Message, error) {
 	body := openaiReq{
-		Model:       req.Model,
-		Messages:    req.Messages,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      true,
-		Tools:       req.Tools,
+		Model:           req.Model,
+		Messages:        req.Messages,
+		Temperature:     req.Temperature,
+		MaxTokens:       req.MaxTokens,
+		Stream:          true,
+		Tools:           req.Tools,
+		ReasoningEffort: openaiReasoningEffort(req.ReasoningEffort),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
