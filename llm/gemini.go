@@ -149,7 +149,10 @@ type geminiErr struct {
 
 func buildGeminiReq(req Request) geminiReq {
 	var contents []geminiContent
-	var system *geminiContent
+	// Gemini accepts a single systemInstruction, but a request may carry
+	// several system messages. Collect them all and join them in order so
+	// none is silently dropped.
+	var systemTexts []string
 
 	part := func(ps ...geminiPart) json.RawMessage {
 		b, _ := json.Marshal(ps)
@@ -159,7 +162,7 @@ func buildGeminiReq(req Request) geminiReq {
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case RoleSystem:
-			system = &geminiContent{Parts: part(geminiPart{Text: msg.Content})}
+			systemTexts = append(systemTexts, msg.Content)
 		case RoleUser:
 			contents = append(contents, geminiContent{
 				Role: "user", Parts: part(geminiPart{Text: msg.Content}),
@@ -196,6 +199,11 @@ func buildGeminiReq(req Request) geminiReq {
 				}),
 			})
 		}
+	}
+
+	var system *geminiContent
+	if len(systemTexts) > 0 {
+		system = &geminiContent{Parts: part(geminiPart{Text: strings.Join(systemTexts, "\n\n")})}
 	}
 
 	g := geminiReq{
