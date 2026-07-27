@@ -19,13 +19,51 @@ type openaiTransport struct {
 }
 
 type openaiReq struct {
-	Model           string    `json:"model"`
-	Messages        []Message `json:"messages"`
-	Temperature     float64   `json:"temperature,omitempty"`
-	MaxTokens       int       `json:"max_tokens,omitempty"`
-	Stream          bool      `json:"stream,omitempty"`
-	Tools           []Tool    `json:"tools,omitempty"`
-	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+	Model               string    `json:"model"`
+	Messages            []Message `json:"messages"`
+	Temperature         float64   `json:"temperature,omitempty"`
+	MaxTokens           int       `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
+	Stream              bool      `json:"stream,omitempty"`
+	Tools               []Tool    `json:"tools,omitempty"`
+	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`
+}
+
+// isReasoningTierModel reports whether a model belongs to one of OpenAI's
+// reasoning-tier families (o1, o3, o4-mini, gpt-5). These reject several
+// chat-completion parameters that older models accept without complaint:
+// max_tokens (must use max_completion_tokens instead) and any non-default
+// temperature. Everything else - the gpt-4 family, local OpenAI-compatible
+// servers served through lmstudio, and Copilot's own model aliases - still
+// accepts the legacy parameter set.
+func isReasoningTierModel(model string) bool {
+	for _, prefix := range []string{"o1", "o3", "o4", "gpt-5"} {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxTokenFields returns the (max_tokens, max_completion_tokens) pair to set
+// on an outgoing request body, routing the caller's token budget to whichever
+// parameter the target model accepts.
+func maxTokenFields(model string, maxTokens int) (legacy int, completion int) {
+	if isReasoningTierModel(model) {
+		return 0, maxTokens
+	}
+	return maxTokens, 0
+}
+
+// effectiveTemperature returns the temperature to send for a model.
+// Reasoning-tier models only support their default temperature (1) and
+// reject any override with a 400, so the field is omitted (the zero value
+// is dropped by the request struct's omitempty tag) rather than sent.
+func effectiveTemperature(model string, requested float64) float64 {
+	if isReasoningTierModel(model) {
+		return 0
+	}
+	return requested
 }
 
 // openaiReasoningEffort maps our provider-agnostic enum to the values OpenAI's
@@ -105,13 +143,15 @@ func newOpenAITransport(apiKey string) *openaiTransport {
 }
 
 func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Response, error) {
+	legacyMax, completionMax := maxTokenFields(req.Model, req.MaxTokens)
 	body := openaiReq{
-		Model:           req.Model,
-		Messages:        req.Messages,
-		Temperature:     req.Temperature,
-		MaxTokens:       req.MaxTokens,
-		Tools:           req.Tools,
-		ReasoningEffort: openaiReasoningEffort(req.ReasoningEffort),
+		Model:               req.Model,
+		Messages:            req.Messages,
+		Temperature:         effectiveTemperature(req.Model, req.Temperature),
+		MaxTokens:           legacyMax,
+		MaxCompletionTokens: completionMax,
+		Tools:               req.Tools,
+		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -156,14 +196,16 @@ func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Re
 }
 
 func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (<-chan Message, error) {
+	legacyMax, completionMax := maxTokenFields(req.Model, req.MaxTokens)
 	body := openaiReq{
-		Model:           req.Model,
-		Messages:        req.Messages,
-		Temperature:     req.Temperature,
-		MaxTokens:       req.MaxTokens,
-		Stream:          true,
-		Tools:           req.Tools,
-		ReasoningEffort: openaiReasoningEffort(req.ReasoningEffort),
+		Model:               req.Model,
+		Messages:            req.Messages,
+		Temperature:         effectiveTemperature(req.Model, req.Temperature),
+		MaxTokens:           legacyMax,
+		MaxCompletionTokens: completionMax,
+		Stream:              true,
+		Tools:               req.Tools,
+		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
