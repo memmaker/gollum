@@ -24,7 +24,7 @@ type openaiReq struct {
 	Temperature         float64   `json:"temperature,omitempty"`
 	MaxTokens           int       `json:"max_tokens,omitempty"`
 	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
-	Stream              bool      `json:"stream,omitempty"`
+	Stream              bool      `json:"stream"`
 	Tools               []Tool    `json:"tools,omitempty"`
 	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`
 }
@@ -66,13 +66,23 @@ func effectiveTemperature(model string, requested float64) float64 {
 	return requested
 }
 
-// openaiReasoningEffort maps our provider-agnostic enum to the values OpenAI's
-// API accepts. OpenAI has no literal "off" for reasoning models, so None maps
-// to "minimal", the lowest level that still works across current models.
-func openaiReasoningEffort(e ReasoningEffort) string {
+// openaiReasoningEffort maps our provider-agnostic enum to the values the
+// target model accepts. OpenAI's own reasoning-tier models have no literal
+// "off", so None maps to "minimal" there; other OpenAI-compatible backends
+// (local proxies, lmstudio, etc.) take the literal "none", which actually
+// suppresses reasoning_content instead of just minimizing it.
+func openaiReasoningEffort(e ReasoningEffort, model string) string {
+	// The gpt-5*-chat variants carry a reasoning-tier name but accept only
+	// their own default effort and 400 on every other value, so send nothing.
+	if strings.Contains(model, "-chat") {
+		return ""
+	}
 	switch e {
 	case ReasoningEffortNone:
-		return "minimal"
+		if isReasoningTierModel(model) {
+			return "minimal"
+		}
+		return "none"
 	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh:
 		return string(e)
 	default:
@@ -151,7 +161,7 @@ func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Re
 		MaxTokens:           legacyMax,
 		MaxCompletionTokens: completionMax,
 		Tools:               req.Tools,
-		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort),
+		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort, req.Model),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -205,7 +215,7 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 		MaxCompletionTokens: completionMax,
 		Stream:              true,
 		Tools:               req.Tools,
-		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort),
+		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort, req.Model),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
