@@ -63,6 +63,14 @@ const (
 	ReasoningEffortHigh   ReasoningEffort = "high"
 )
 
+// ServiceTier selects OpenAI's processing tier for a request. Flex trades
+// higher latency for lower cost. It is OpenAI-only: the field is dropped for
+// every other provider, including the OpenAI-compatible ones (copilot,
+// lmstudio, huggingface). Leave it empty for the account default.
+type ServiceTier string
+
+const ServiceTierFlex ServiceTier = "flex"
+
 type Request struct {
 	Model           string          `json:"model"`
 	Messages        []Message       `json:"messages"`
@@ -70,6 +78,7 @@ type Request struct {
 	MaxTokens       int             `json:"max_tokens,omitempty"`
 	Tools           []Tool          `json:"tools,omitempty"`
 	ReasoningEffort ReasoningEffort `json:"reasoning_effort,omitempty"`
+	ServiceTier     ServiceTier     `json:"service_tier,omitempty"`
 }
 
 type Response struct {

@@ -17,8 +17,10 @@ func newOpenAIProvider(cfg Config) *openAIProvider {
 	if baseURL == "" {
 		baseURL = defaultOpenAIBaseURL
 	}
+	t := newOpenAITransport(cfg.APIKey)
+	t.allowServiceTier = true
 	return &openAIProvider{
-		transport: newOpenAITransport(cfg.APIKey),
+		transport: t,
 		model:     cfg.Model,
 		baseURL:   baseURL,
 	}

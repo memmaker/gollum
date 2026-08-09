@@ -16,6 +16,10 @@ import (
 type openaiTransport struct {
 	apiKey string
 	client *http.Client
+	// allowServiceTier gates the OpenAI-only `service_tier` field. Only the
+	// openai provider sets it; the other OpenAI-compatible backends sharing
+	// this transport reject or ignore the field, so they never send it.
+	allowServiceTier bool
 }
 
 type openaiReq struct {
@@ -27,6 +31,16 @@ type openaiReq struct {
 	Stream              bool      `json:"stream"`
 	Tools               []Tool    `json:"tools,omitempty"`
 	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`
+	ServiceTier         string    `json:"service_tier,omitempty"`
+}
+
+// serviceTier returns the value to put in the outgoing body, dropping it for
+// backends that are OpenAI-compatible but not OpenAI.
+func (t *openaiTransport) serviceTier(s ServiceTier) string {
+	if !t.allowServiceTier {
+		return ""
+	}
+	return string(s)
 }
 
 // isReasoningTierModel reports whether a model belongs to one of OpenAI's
@@ -162,6 +176,7 @@ func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Re
 		MaxCompletionTokens: completionMax,
 		Tools:               req.Tools,
 		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort, req.Model),
+		ServiceTier:         t.serviceTier(req.ServiceTier),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -216,6 +231,7 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 		Stream:              true,
 		Tools:               req.Tools,
 		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort, req.Model),
+		ServiceTier:         t.serviceTier(req.ServiceTier),
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {

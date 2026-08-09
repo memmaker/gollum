@@ -14,6 +14,7 @@ type Session struct {
 	Temp            float64
 	MaxTokens       int
 	ReasoningEffort ReasoningEffort
+	ServiceTier     ServiceTier
 	tools           []Tool
 	executors       map[string]ToolExecutor
 }
@@ -39,6 +40,7 @@ func (s *Session) Send(ctx context.Context, prompt string) (Response, error) {
 		Temperature:     s.Temp,
 		MaxTokens:       s.MaxTokens,
 		ReasoningEffort: s.ReasoningEffort,
+		ServiceTier:     s.ServiceTier,
 	}
 	resp, err := s.client.Chat(ctx, req)
 	if err != nil {
@@ -56,6 +58,7 @@ func (s *Session) Stream(ctx context.Context, prompt string) (<-chan Message, er
 		Temperature:     s.Temp,
 		MaxTokens:       s.MaxTokens,
 		ReasoningEffort: s.ReasoningEffort,
+		ServiceTier:     s.ServiceTier,
 	}
 	innerCh, err := s.client.Stream(ctx, req)
 	if err != nil {
@@ -96,6 +99,7 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 				MaxTokens:       s.MaxTokens,
 				Tools:           s.tools,
 				ReasoningEffort: s.ReasoningEffort,
+				ServiceTier:     s.ServiceTier,
 			}
 
 			// use a cancellable child context so we can stop a stream when a tool call appears
@@ -186,6 +190,7 @@ func (s *Session) SendWithTools(ctx context.Context, prompt string, userTools []
 			MaxTokens:       s.MaxTokens,
 			Tools:           allTools,
 			ReasoningEffort: s.ReasoningEffort,
+			ServiceTier:     s.ServiceTier,
 		}
 		resp, err := s.client.Chat(ctx, req)
 		if err != nil {
