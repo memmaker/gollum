@@ -126,9 +126,10 @@ func renderContext(msgs []llm.Message, tools []llm.Tool) string {
 			fmt.Fprintf(&b, "%s\n", body)
 		}
 		for _, tc := range msg.ToolCalls {
-			fmt.Fprintf(&b, "%s %s\n",
-				toolStyle.Render("⚒ "+tc.Function.Name),
-				dim.Render(strings.TrimSpace(tc.Function.Arguments)))
+			fmt.Fprintf(&b, "%s\n", toolStyle.Render("⚒ "+tc.Function.Name))
+			if pretty := prettyJSON(tc.Function.Arguments); pretty != "" {
+				fmt.Fprintf(&b, "%s\n", dim.Render(pretty))
+			}
 		}
 	}
 	if len(tools) > 0 {
@@ -137,7 +138,7 @@ func renderContext(msgs []llm.Message, tools []llm.Tool) string {
 			desc := strings.TrimSpace(t.Function.Description)
 			params := ""
 			if raw, err := json.Marshal(t.Function.Parameters); err == nil {
-				params = string(raw)
+				params = prettyJSON(string(raw))
 			}
 			fmt.Fprintf(&b, "%s %s\n", toolStyle.Render("⚒ "+t.Function.Name), dim.Render(desc))
 			if params != "" && params != "null" {

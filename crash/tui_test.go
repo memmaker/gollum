@@ -224,8 +224,12 @@ func TestToolCallRendering(t *testing.T) {
 	m.chunk(llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
 		{ID: "1", Function: llm.ToolCallFunction{Name: "user_choice", Arguments: long}},
 	}})
-	if !strings.Contains(m.transcript.String(), long) {
-		t.Fatal("debug mode still truncates the arguments")
+	out = m.transcript.String()
+	if !strings.Contains(out, "pick an animal") || !strings.Contains(out, `"cat"`) {
+		t.Fatalf("debug mode still truncates the arguments:\n%s", out)
+	}
+	if !strings.Contains(out, "\n") {
+		t.Fatal("debug mode should pretty-print arguments across multiple lines")
 	}
 }
 
@@ -339,7 +343,9 @@ func TestRenderContext(t *testing.T) {
 	}, []llm.Tool{
 		{Function: llm.ToolFunction{Name: "user_choice", Description: "ask the user", Parameters: map[string]any{"type": "object"}}},
 	})
-	for _, want := range []string{"pick one", "user_choice", `{"options":["cat"]}`, "cat", "tools offered", "ask the user", `"type":"object"`} {
+	// The call's arguments are pretty-printed across lines, so check pieces of
+	// the JSON rather than the exact compact string.
+	for _, want := range []string{"pick one", "user_choice", `"options"`, `"cat"`, "cat", "tools offered", "ask the user", `"type": "object"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("context view is missing %q:\n%s", want, out)
 		}

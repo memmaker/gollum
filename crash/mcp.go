@@ -316,12 +316,16 @@ func notifyMCPDead(name string, err error) {
 }
 
 // registerMCPTools adds every tool an MCP server advertised to the session,
-// each one routed back through this client's stdio connection. A call that
-// fails because the connection itself is gone (not an ordinary tool error)
-// reports it so the TUI can mark the MCP disabled and tell the user.
-func registerMCPTools(sess *llm.Session, c *mcpClient) {
+// skipping any the user has individually disabled from the Tools menu, each
+// one routed back through this client's stdio connection. A call that fails
+// because the connection itself is gone (not an ordinary tool error) reports
+// it so the TUI can mark the MCP disabled and tell the user.
+func registerMCPTools(sess *llm.Session, c *mcpClient, toolConfigs []ToolConfig) {
 	for _, t := range c.tools {
 		t := t
+		if !toolEnabled(t.Name, toolConfigs) {
+			continue
+		}
 		sess.AddTool(llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -343,7 +347,7 @@ func registerMCPTools(sess *llm.Session, c *mcpClient) {
 // A server that fails to start has its config flipped to disabled — so the
 // MCPs menu reflects reality — and its error appended to the returned notes;
 // startup itself is never blocked by one bad server.
-func startMCPs(sess *llm.Session, cfgs []MCPConfig) (map[string]*mcpClient, []string) {
+func startMCPs(sess *llm.Session, cfgs []MCPConfig, toolConfigs []ToolConfig) (map[string]*mcpClient, []string) {
 	clients := map[string]*mcpClient{}
 	var notes []string
 	for i := range cfgs {
@@ -357,7 +361,7 @@ func startMCPs(sess *llm.Session, cfgs []MCPConfig) (map[string]*mcpClient, []st
 			continue
 		}
 		clients[cfgs[i].Name] = c
-		registerMCPTools(sess, c)
+		registerMCPTools(sess, c, toolConfigs)
 	}
 	return clients, notes
 }

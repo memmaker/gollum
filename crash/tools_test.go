@@ -44,7 +44,7 @@ func TestToolMenuToggles(t *testing.T) {
 	}
 
 	// Toggle bash off
-	m.toggleTool(1)
+	m.toggleTool("bash")
 	if m.toolConfigs[1].Enabled {
 		t.Fatal("bash still enabled after toggle")
 	}
@@ -68,7 +68,7 @@ func TestToolMenuToggles(t *testing.T) {
 	}
 
 	// Toggle back on
-	m.toggleTool(1)
+	m.toggleTool("bash")
 	if !m.toolConfigs[1].Enabled {
 		t.Fatal("bash disabled after toggling back on")
 	}

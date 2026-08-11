@@ -213,7 +213,7 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 	// MCPs are optional: a config with none, or one that fails to load, still
 	// starts crash — only the provider config in cfgs is load-bearing.
 	mcpConfigs, _ := LoadMCPConfigs()
-	mcpClients, mcpNotes := startMCPs(sess, mcpConfigs)
+	mcpClients, mcpNotes := startMCPs(sess, mcpConfigs, toolConfigs)
 
 	oneLine := newOneLineInput()
 	oneLine.Focus()

@@ -1,12 +1,30 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/memmaker/gollum/llm"
 )
+
+// prettyJSON reformats a tool call's argument JSON over multiple indented
+// lines so the structure sent to the model is actually legible. Falls back
+// to the raw string for anything that is not valid JSON (rare, but backends
+// are not required to send well-formed arguments).
+func prettyJSON(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, []byte(s), "", "  "); err != nil {
+		return s
+	}
+	return buf.String()
+}
 
 // toolBlock is one tool call plus its result (once it arrives), tracked so
 // the pair can be folded (the default, one line each) or expanded in place —
@@ -34,11 +52,17 @@ func (m *tui) blockFull(b *toolBlock) bool {
 }
 
 func (m *tui) renderToolCall(tc llm.ToolCall, full bool) string {
-	args := strings.TrimSpace(tc.Function.Arguments)
+	head := toolStyle.Render("⚒ " + tc.Function.Name)
 	if !full {
-		args = ellipsis(args, max(m.out.Width-ansi.StringWidth(tc.Function.Name)-6, 10))
+		args := ellipsis(strings.TrimSpace(tc.Function.Arguments), max(m.out.Width-ansi.StringWidth(tc.Function.Name)-6, 10))
+		return head + " " + dim.Render(args)
 	}
-	return toolStyle.Render("⚒ "+tc.Function.Name) + " " + dim.Render(args)
+	// Expanded: the JSON structure itself is the point, so it gets its own
+	// indented lines instead of being squeezed onto the call's line.
+	if pretty := prettyJSON(tc.Function.Arguments); pretty != "" {
+		return head + "\n" + dim.Render(pretty)
+	}
+	return head
 }
 
 func (m *tui) renderToolResult(msg llm.Message, full bool) string {

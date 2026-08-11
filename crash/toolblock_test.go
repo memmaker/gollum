@@ -22,7 +22,8 @@ func TestToolBlockFoldExpand(t *testing.T) {
 	m := &tui{sess: llm.NewSession(nil, ""), blockCursor: -1}
 	m.transcript.WriteString("before\n\n")
 
-	longArgs := `{"path":"` + strings.Repeat("x", 200) + `"}`
+	longValue := strings.Repeat("x", 200)
+	longArgs := `{"path":"` + longValue + `"}`
 	m.addToolCall(llm.ToolCall{ID: "1", Function: llm.ToolCallFunction{Name: "read_file", Arguments: longArgs}})
 	longResult := strings.Repeat("line\n", 5) + "done"
 	m.addToolResult(llm.Message{Role: llm.RoleTool, ToolCallID: "1", Content: longResult})
@@ -50,12 +51,15 @@ func TestToolBlockFoldExpand(t *testing.T) {
 		t.Fatal("toggle should have expanded block 1")
 	}
 	got := m.transcript.String()
-	if !strings.Contains(got, longArgs) {
-		t.Fatal("expanded call is missing its full arguments")
-	}
 	// lipgloss pads each line of a multi-line Render to the block's widest
 	// line, so compare trimmed lines rather than the raw substring.
 	trimmed := trimTrailingSpaces(got)
+	if !strings.Contains(trimmed, `"path"`) || !strings.Contains(trimmed, longValue) {
+		t.Fatalf("expanded call is missing its pretty-printed arguments:\n%s", got)
+	}
+	if b1.callLines < 2 {
+		t.Fatal("expanded call arguments should span multiple lines")
+	}
 	for _, line := range strings.Split(longResult, "\n") {
 		if !strings.Contains(trimmed, line) {
 			t.Fatalf("expanded result is missing line %q", line)

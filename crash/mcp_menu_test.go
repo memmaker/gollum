@@ -32,7 +32,7 @@ func TestMCPMenuTogglesAndReturnsToMainMenu(t *testing.T) {
 	sess := llm.NewSession(nil, "")
 	client := newMCPClient("fake", nopWriteCloser{Writer: io.Discard}, strings.NewReader(""), nil)
 	client.tools = []mcpToolDef{{Name: "fake_tool", Description: "does a thing"}}
-	registerMCPTools(sess, client)
+	registerMCPTools(sess, client, nil)
 
 	m := &tui{
 		sess:       sess,
@@ -101,7 +101,7 @@ func TestMCPDeathDisablesAndNotes(t *testing.T) {
 	sess := llm.NewSession(nil, "")
 	client := newMCPClient("fake", nopWriteCloser{Writer: io.Discard}, strings.NewReader(""), nil)
 	client.tools = []mcpToolDef{{Name: "fake_tool"}}
-	registerMCPTools(sess, client)
+	registerMCPTools(sess, client, nil)
 
 	m := &tui{
 		sess:       sess,

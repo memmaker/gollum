@@ -15,6 +15,18 @@ type ToolConfig struct {
 	Enabled bool
 }
 
+// toolEnabled reports whether name should be offered to the model: true
+// unless a `tool:` record in cfgs explicitly disables it. Absence means
+// enabled — an MCP tool the user has never toggled has no record yet.
+func toolEnabled(name string, cfgs []ToolConfig) bool {
+	for _, c := range cfgs {
+		if c.Name == name {
+			return c.Enabled
+		}
+	}
+	return true
+}
+
 // registerTools installs the harness tools on a session, but only ones the user
 // has enabled. The llm library ships no tools of its own — anything that talks
 // to a terminal lives here.

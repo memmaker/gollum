@@ -355,7 +355,7 @@ func (m *tui) toggleMCP(i int) {
 		return
 	}
 	m.mcpClients[cfg.Name] = c
-	registerMCPTools(m.sess, c)
+	registerMCPTools(m.sess, c, m.toolConfigs)
 }
 
 // stopMCP kills a running client and drops its tools from the session. Safe
@@ -389,13 +389,14 @@ func (m *tui) disableMCP(name, note string) {
 	m.refreshSidebar()
 }
 
-// openToolsMenu lists every built-in tool with its current on/off state.
-// Like openMCPMenu, it stays open across toggles and returns to the main menu
-// when cancelled.
+// openToolsMenu lists every built-in tool plus every tool offered by a
+// running MCP server, with its current on/off state. Like openMCPMenu, it
+// stays open across toggles and returns to the main menu when cancelled.
 func (m *tui) openToolsMenu() {
-	labels := make([]string, len(m.toolConfigs))
-	for i, c := range m.toolConfigs {
-		labels[i] = c.Name + ": " + onOff(c.Enabled)
+	names := m.toolMenuNames()
+	labels := make([]string, len(names))
+	for i, n := range names {
+		labels[i] = n + ": " + onOff(toolEnabled(n, m.toolConfigs))
 	}
 	m.openChoice("Tools", labels, func(i int) {
 		if i < 0 {
@@ -403,28 +404,61 @@ func (m *tui) openToolsMenu() {
 			m.refreshSidebar()
 			return
 		}
-		m.toggleTool(i)
+		m.toggleTool(names[i])
 		m.openToolsMenu()
 		m.choice.Select(i)
 		m.refreshSidebar()
 	})
 }
 
-// toggleTool flips one tool on or off and updates the session.
-func (m *tui) toggleTool(i int) {
-	cfg := &m.toolConfigs[i]
-	cfg.Enabled = !cfg.Enabled
-	if err := SaveToolEnabled(cfg.Name, cfg.Enabled); err != nil {
-		m.note = "tool: could not save " + cfg.Name + ": " + err.Error()
+// toolMenuNames lists the built-ins plus every tool name currently offered
+// by a live MCP client, so the Tools menu covers both without needing its
+// own copy of what each MCP server advertised.
+func (m *tui) toolMenuNames() []string {
+	names := []string{"user_choice", "bash"}
+	seen := map[string]bool{"user_choice": true, "bash": true}
+	for _, c := range m.mcpClients {
+		for _, t := range c.tools {
+			if !seen[t.Name] {
+				seen[t.Name] = true
+				names = append(names, t.Name)
+			}
+		}
+	}
+	return names
+}
+
+// toggleTool flips one tool on or off by name — built-in or MCP-provided —
+// and updates the session to match.
+func (m *tui) toggleTool(name string) {
+	enabled := !toolEnabled(name, m.toolConfigs)
+	if err := SaveToolEnabled(name, enabled); err != nil {
+		m.note = "tool: could not save " + name + ": " + err.Error()
 		return
 	}
+	m.setToolConfig(name, enabled)
 
-	m.sess.RemoveTool(cfg.Name)
+	m.sess.RemoveTool(name)
 	registerTools(m.sess, m.toolConfigs)
+	for _, c := range m.mcpClients {
+		registerMCPTools(m.sess, c, m.toolConfigs)
+	}
 
-	m.transcript.WriteString(dim.Render("tool "+cfg.Name+" "+onOff(cfg.Enabled)) + "\n\n")
+	m.transcript.WriteString(dim.Render("tool "+name+" "+onOff(enabled)) + "\n\n")
 	m.setOutput(m.transcript.String())
 	m.out.GotoBottom()
+}
+
+// setToolConfig records name's enabled state in m.toolConfigs in place,
+// appending a new entry the first time an MCP tool is ever toggled.
+func (m *tui) setToolConfig(name string, enabled bool) {
+	for i := range m.toolConfigs {
+		if m.toolConfigs[i].Name == name {
+			m.toolConfigs[i].Enabled = enabled
+			return
+		}
+	}
+	m.toolConfigs = append(m.toolConfigs, ToolConfig{Name: name, Enabled: enabled})
 }
 
 // toolListing renders "Tools": every tool currently offered to the model,
@@ -432,9 +466,9 @@ func (m *tui) toggleTool(i int) {
 func (m *tui) toolListing() string {
 	var b strings.Builder
 	b.WriteString(label.Render("built-in") + "\n")
-	for _, cfg := range m.toolConfigs {
-		if cfg.Enabled {
-			b.WriteString("  " + cfg.Name + "\n")
+	for _, name := range []string{"user_choice", "bash"} {
+		if toolEnabled(name, m.toolConfigs) {
+			b.WriteString("  " + name + "\n")
 		}
 	}
 	for _, cfg := range m.mcpConfigs {
@@ -444,6 +478,9 @@ func (m *tui) toolListing() string {
 		}
 		b.WriteString("\n" + label.Render(cfg.Name) + "\n")
 		for _, t := range c.tools {
+			if !toolEnabled(t.Name, m.toolConfigs) {
+				continue
+			}
 			b.WriteString("  " + t.Name + "\n")
 		}
 	}
