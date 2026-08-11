@@ -84,6 +84,10 @@ func applyColors() {
 	// conversation is being thrown away after every turn.
 	oblivumStyle = lipgloss.NewStyle().Foreground(color("error")).Bold(true)
 	toolStyle = lipgloss.NewStyle().Foreground(color("tool"))
+	// blockBarStyle marks the block-nav cursor's tool call with a left bar —
+	// Crush's green highlight, reusing the "tool" colour so no new palette
+	// entry is needed.
+	blockBarStyle = lipgloss.NewStyle().Foreground(color("tool"))
 	focusStyle = lipgloss.NewStyle().Foreground(color("focus"))
 	animDark = blendColor("anim_dark")
 	animLight = blendColor("anim_light")

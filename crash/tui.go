@@ -50,6 +50,10 @@ const (
 
 type keymap struct {
 	send, altEnter, newlineHint, multiline, oneLineHint, next, up, down, top, bottom, quit, pick, cancel, menu, history, session key.Binding
+	// blockUp/blockDown/fold are shown in the output pane's help line once it
+	// holds a tool block — up/down and enter are already bound to selectBlock
+	// and toggleSelectedBlock in handleBlockKey, these exist for their help text.
+	blockUp, blockDown, fold key.Binding
 }
 
 var keys = keymap{
@@ -85,21 +89,26 @@ var keys = keymap{
 	// It carries them anyway because the help bar hides a binding with no keys,
 	// and the point of this one is to say the history is there at all.
 	history: key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "history")),
+
+	blockUp:   key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "pick block")),
+	blockDown: key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "pick block")),
+	fold:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "fold/expand")),
 }
 
 // Styles are built from the palette in colors.go; LoadColors rebuilds them
 // once a colors.rec has been read.
 var (
-	borderStyle  lipgloss.Style
-	focusedStyle lipgloss.Style
-	dim          lipgloss.Style
-	label        lipgloss.Style
-	errStyle     lipgloss.Style
-	toolStyle    lipgloss.Style
-	focusStyle   lipgloss.Style
-	accentStyle  lipgloss.Style // accent without the bold of label
-	oblivumStyle lipgloss.Style // the OBLIVIUM marker: bold error red
-	titleStyle   lipgloss.Style // overlay headings: text on an accent bar
+	borderStyle   lipgloss.Style
+	focusedStyle  lipgloss.Style
+	dim           lipgloss.Style
+	label         lipgloss.Style
+	errStyle      lipgloss.Style
+	toolStyle     lipgloss.Style
+	focusStyle    lipgloss.Style
+	accentStyle   lipgloss.Style // accent without the bold of label
+	oblivumStyle  lipgloss.Style // the OBLIVIUM marker: bold error red
+	titleStyle    lipgloss.Style // overlay headings: text on an accent bar
+	blockBarStyle lipgloss.Style // left bar marking the block-nav cursor's tool call
 )
 
 func init() { applyColors() }
@@ -153,6 +162,9 @@ type tui struct {
 	sel         selection // line selection in one of the panes
 	sideContent string    // sidebar text, unstyled by the selection
 
+	blocks      []*toolBlock // every tool call (+ its result, once in) this session, in order
+	blockCursor int          // index into blocks the output pane's block-nav is on; -1 = none
+
 	frame    int  // animation step for the bar across the top
 	debug    bool // /debug: show tool arguments and results in full
 	produced bool // anything at all arrived this turn: text or tool activity
@@ -166,8 +178,8 @@ type tui struct {
 	ttsLang    string            // which configured engine speaks
 	ttsEngines map[string]string // language key -> engine command
 
-	mcpConfigs []MCPConfig           // every `mcp:` record, on or off
-	mcpClients map[string]*mcpClient // running servers, keyed by config name
+	mcpConfigs  []MCPConfig           // every `mcp:` record, on or off
+	mcpClients  map[string]*mcpClient // running servers, keyed by config name
 	toolConfigs []ToolConfig          // every built-in tool, on or off
 
 	// gitStatus is the branch + diff tally shown on the statusbar's right
@@ -207,22 +219,23 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 	oneLine.Focus()
 
 	m := &tui{
-		ctx:        ctx,
-		sess:       sess,
-		cfgs:       cfgs,
-		raw:        raw,
-		oneLine:    oneLine,
-		multiLine:  newMultiLineInput(),
-		help:       help.New(),
-		current:    cfgs[0].Provider + "/" + model,
-		ttsOn:      settings.TTSAnswers,
-		ttsLang:    settings.TTSLang,
-		ttsEngines: settings.TTSEngines,
-		history:    loadHistory(),
-		mcpConfigs: mcpConfigs,
-		mcpClients: mcpClients,
+		ctx:         ctx,
+		sess:        sess,
+		cfgs:        cfgs,
+		raw:         raw,
+		oneLine:     oneLine,
+		multiLine:   newMultiLineInput(),
+		help:        help.New(),
+		current:     cfgs[0].Provider + "/" + model,
+		ttsOn:       settings.TTSAnswers,
+		ttsLang:     settings.TTSLang,
+		ttsEngines:  settings.TTSEngines,
+		history:     loadHistory(),
+		mcpConfigs:  mcpConfigs,
+		mcpClients:  mcpClients,
 		toolConfigs: toolConfigs,
-		gitStatus:  gitStatusLine(),
+		gitStatus:   gitStatusLine(),
+		blockCursor: -1,
 	}
 	m.histAt = len(m.history)
 	if len(mcpNotes) > 0 {
@@ -407,6 +420,9 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout(m.width, m.height)
 			return m, cmd
 		}
+		if m.focus == paneOutput && m.handleBlockKey(msg.String()) {
+			return m, nil
+		}
 		return m, m.scroll(msg)
 	}
 	// The list filters through a command whose result comes back as its own
@@ -486,10 +502,10 @@ func (m *tui) chunk(msg llm.Message) {
 	case len(msg.ToolCalls) > 0:
 		m.flushAnswer()
 		for _, tc := range msg.ToolCalls {
-			m.transcript.WriteString(m.toolCallLine(tc) + "\n")
+			m.addToolCall(tc)
 		}
 	case msg.Role == llm.RoleTool:
-		m.transcript.WriteString(m.toolResultLine(msg) + "\n\n")
+		m.addToolResult(msg)
 	default:
 		if m.answer.Len() == 0 {
 			// A fresh run of assistant text starts its own block: whatever came
@@ -610,26 +626,6 @@ func (m *tui) endBlock() {
 	}
 	m.transcript.Reset()
 	m.transcript.WriteString(body + "\n\n")
-}
-
-func (m *tui) toolCallLine(tc llm.ToolCall) string {
-	args := strings.TrimSpace(tc.Function.Arguments)
-	if !m.debug {
-		args = ellipsis(args, max(m.out.Width-ansi.StringWidth(tc.Function.Name)-6, 10))
-	}
-	return toolStyle.Render("⚒ "+tc.Function.Name) + " " + dim.Render(args)
-}
-
-func (m *tui) toolResultLine(msg llm.Message) string {
-	body := strings.TrimSpace(msg.Content)
-	style := dim
-	if strings.HasPrefix(body, "error:") {
-		style = errStyle
-	}
-	if !m.debug {
-		body = ellipsis(body, max(m.out.Width-6, 10))
-	}
-	return style.Render("  ↳ " + body)
 }
 
 // ellipsis shortens a single-line preview. Debug mode skips it.
@@ -815,7 +811,7 @@ func (m *tui) setOutput(s string) {
 		return
 	}
 	atBottom := m.out.AtBottom()
-	m.out.SetContent(m.sel.highlight(s, paneOutput))
+	m.out.SetContent(m.highlightBlock(m.sel.highlight(s, paneOutput)))
 	if atBottom {
 		m.out.GotoBottom()
 	}
@@ -939,6 +935,12 @@ func (m *tui) helpLine() string {
 		} else {
 			b = []key.Binding{keys.send, keys.history, keys.multiline, keys.next, keys.menu, keys.quit}
 		}
+	case paneOutput:
+		if len(m.blocks) > 0 {
+			b = []key.Binding{keys.blockUp, keys.blockDown, keys.fold, keys.top, keys.bottom, keys.next, keys.menu, keys.quit}
+			break
+		}
+		fallthrough
 	default:
 		b = []key.Binding{keys.up, keys.down, keys.top, keys.bottom, keys.next, keys.menu, keys.quit}
 	}

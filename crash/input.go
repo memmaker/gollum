@@ -148,7 +148,10 @@ func (m *tui) inputView() string {
 // mid-resize never shows a stale one. The multiline box gives up two columns
 // to its own left and right border edges.
 func (m *tui) setInputWidth(w int) {
-	m.oneLine.Width = max(w-ansi.StringWidth(m.oneLine.Prompt), 1)
+	// -1: the cursor renders as an extra column past Width when it sits at
+	// line end, so reserving Width up to the full remaining space pushes it
+	// past the terminal edge.
+	m.oneLine.Width = max(w-ansi.StringWidth(m.oneLine.Prompt)-1, 1)
 	m.multiLine.SetWidth(max(w-multilineBorderCols, 1))
 }
 

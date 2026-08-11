@@ -297,6 +297,7 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 		toolCalls map[int]*oaToolCall
 	}
 	parts := make(map[int]*partial)
+	var lastUsage *Usage
 
 	// helper to ensure partial exists
 	getPart := func(idx int) *partial {
@@ -322,6 +323,7 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 		scanner := bufio.NewScanner(resp.Body)
 		// SSE chunks can exceed bufio's default 64KB line limit.
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scan:
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line == "" {
@@ -332,7 +334,7 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 			}
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
-				return
+				break scan
 			}
 
 			// Routers report mid-stream failures as an error object in the
@@ -354,14 +356,13 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 				fail(fmt.Errorf("llm: unreadable chunk: %w: %s", err, truncateForError(data)))
 				return
 			}
-			// The usage chunk arrives last and carries no choices.
+			// Usage is meant to arrive once, in a final choice-less chunk, but
+			// some routers (e.g. free OpenRouter models) attach a running
+			// total to every chunk. Keep only the latest and emit it once the
+			// stream ends, or a duplicate lands per token instead of per turn.
 			if chunk.Usage != nil {
 				u := chunk.Usage.toUsage()
-				select {
-				case ch <- Message{Role: RoleAssistant, Usage: &u}:
-				case <-ctx.Done():
-					return
-				}
+				lastUsage = &u
 			}
 			for _, c := range chunk.Choices {
 				p := getPart(c.Index)
@@ -469,6 +470,13 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 			// The stream stopped early: a dropped connection, a proxy cutting
 			// the response. Silence here reads as a complete empty answer.
 			fail(fmt.Errorf("llm: stream ended early: %w", err))
+			return
+		}
+		if lastUsage != nil {
+			select {
+			case ch <- Message{Role: RoleAssistant, Usage: lastUsage}:
+			case <-ctx.Done():
+			}
 		}
 	}()
 	return ch, nil

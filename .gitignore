@@ -3,3 +3,6 @@
 gollum
 crash-bin
 crash/crash
+
+# local private config
+llm_model.rec

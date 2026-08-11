@@ -3,7 +3,7 @@ Two modules in one repository:
 | Module | Path | What it is |
 |---|---|---|
 | `github.com/memmaker/gollum` | `llm/` | The library: providers, streaming, sessions, tool plumbing. Standard library only. |
-| `github.com/memmaker/crash` | `crash/` | The harness: TUI, config files, the tools that talk to a user. |
+| `github.com/memmaker/crash` | `crash/` | The harness: TUI, config files, the built-in tools and the MCP servers. |
 
 The library ships no tools, no terminal code and no config format. It takes an
 `llm.Config` and is done; deciding where that config comes from is the
@@ -34,30 +34,33 @@ The interactive mode is a four-pane TUI: a scrollable output pane, a scrollable
 status sidebar on the right (dropped below 90 columns), the input box, and a
 help line that lists the keys of whichever pane has focus. Both panes carry
 their own scrollbar, and a gradient bar across the top animates for as long as
-a request chain is running. The mouse wheel scrolls the focused pane, and dragging selects whole lines
-within a single pane and copies them to the system clipboard on release. The
-sidebar reports the model, token usage, turn count and working directory.
-
+a request chain is running. The mouse wheel scrolls the focused pane, and
+dragging selects whole lines within a single pane and copies them to the
+system clipboard on release. The sidebar reports the model, token usage, call
+count and working directory, and inside a git repository the help line adds
+the branch and uncommitted diff tally on its right.
 | Key | Does |
 |---|---|
-| `enter` | send |
-| `alt+enter` | newline in the input box |
+| `enter` | send (one-line prompt) |
+| `ctrl+space` | toggle the one-line prompt and a growable multiline box |
+| `enter` in the box | newline |
+| `ctrl+j` / `alt+enter` in the box | send |
 | `tab` | next pane (input → output → status) |
 | `↑`/`↓`/`pgup`/`pgdn`, `g`/`G` | scroll the focused pane |
-| `↑`/`↓` in the input box | previous/next prompt from the history |
+| `↑`/`↓` in the one-line prompt | previous/next prompt from the history |
 | `ctrl+c` | quit |
 | `ctrl+p` | main menu |
 | `ctrl+s` | session on/off |
 | drag in a pane | select lines, copied on release |
 | `esc` | close an overlay |
-
 `/model` and any tool that asks a question open a filterable list overlay
 composited over the panes — nothing drops back to the plain terminal.
 
 The main menu holds the settings that outlive a run: send tools, full output
 width, session, TTS for answers and TTS language, plus the last request's
 context and the per-request token costs. Toggles stay on screen when flipped,
-so the menu doubles as the display.
+so the menu doubles as the display, and MCPs and Tools open submenus that list
+every MCP server and built-in tool with its current state.
 
 Prompts you send are appended to `~/.config/gollum/history` and come back with
 `↑` in the input box. A prompt that spans lines is stored with its newlines
@@ -112,6 +115,24 @@ tts_answers: off
 tts_lang: de
 tts_engine_de: tts-de-male-kokoro
 tts_engine_en: tts-en-male-kokoro
+```
+
+The same file holds the servers and tools the session offers. An MCP server is
+a record tagged `mcp:` — a subprocess talked to over stdio whose advertised
+tools reach the model while the record is on:
+
+```
+mcp: filesystem
+command: npx
+args: -y @modelcontextprotocol/server-filesystem /tmp
+```
+
+Each built-in tool carries its own toggle record, tagged `tool:`; `user_choice`
+and `bash` both start enabled on a fresh config:
+
+```
+tool: bash
+enabled: off
 ```
 
 ## Using the library
