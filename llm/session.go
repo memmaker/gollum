@@ -168,12 +168,38 @@ func NewSession(client *Client, systemPrompt string) *Session {
 // AddTool registers a tool and its executor for every subsequent call on this
 // session. The library ships no tools of its own; tools that touch a terminal,
 // a filesystem or a network belong to the caller.
+//
+// A name already registered is replaced in place rather than appended
+// alongside — two entries with the same name on the wire is not "last one
+// wins," it is a duplicate listing a provider may simply reject.
 func (s *Session) AddTool(t Tool, exec ToolExecutor) {
-	s.tools = append(s.tools, t)
+	replaced := false
+	for i, existing := range s.tools {
+		if existing.Function.Name == t.Function.Name {
+			s.tools[i] = t
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		s.tools = append(s.tools, t)
+	}
 	if s.executors == nil {
 		s.executors = map[string]ToolExecutor{}
 	}
 	s.executors[t.Function.Name] = exec
+}
+
+// RemoveTool undoes AddTool: the named tool is no longer offered or routable.
+// Safe to call for a name that was never registered.
+func (s *Session) RemoveTool(name string) {
+	for i, t := range s.tools {
+		if t.Function.Name == name {
+			s.tools = append(s.tools[:i], s.tools[i+1:]...)
+			break
+		}
+	}
+	delete(s.executors, name)
 }
 
 // offeredTools is what goes on the wire.

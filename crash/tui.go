@@ -165,6 +165,10 @@ type tui struct {
 	ttsOn      bool              // menu toggle: read answers out loud
 	ttsLang    string            // which configured engine speaks
 	ttsEngines map[string]string // language key -> engine command
+
+	mcpConfigs []MCPConfig           // every `mcp:` record, on or off
+	mcpClients map[string]*mcpClient // running servers, keyed by config name
+	toolConfigs []ToolConfig          // every built-in tool, on or off
 }
 
 // ttsFailMsg reports that the engine died after it had started. It arrives on
@@ -186,7 +190,13 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 		ui.MaxWidth = 0
 	}
 	sess.Timeout = cfgs[0].Timeout
-	registerTools(sess)
+	toolConfigs, _ := LoadToolConfigs()
+	registerTools(sess, toolConfigs)
+
+	// MCPs are optional: a config with none, or one that fails to load, still
+	// starts crash — only the provider config in cfgs is load-bearing.
+	mcpConfigs, _ := LoadMCPConfigs()
+	mcpClients, mcpNotes := startMCPs(sess, mcpConfigs)
 
 	oneLine := newOneLineInput()
 	oneLine.Focus()
@@ -204,13 +214,22 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 		ttsLang:    settings.TTSLang,
 		ttsEngines: settings.TTSEngines,
 		history:    loadHistory(),
+		mcpConfigs: mcpConfigs,
+		mcpClients: mcpClients,
+		toolConfigs: toolConfigs,
 	}
 	m.histAt = len(m.history)
+	if len(mcpNotes) > 0 {
+		m.note = strings.Join(mcpNotes, "; ")
+	}
 	// The engine outlives the program only if it is not killed here, and a
-	// loaded model holds real memory.
+	// loaded model holds real memory. Every MCP subprocess is the same story.
 	defer func() {
 		if m.speech != nil {
 			m.speech.Close()
+		}
+		for _, c := range m.mcpClients {
+			c.close()
 		}
 	}()
 	prog = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -233,6 +252,12 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.finishTurn()
+		return m, nil
+
+	case mcpDeadMsg:
+		if _, ok := m.mcpClients[msg.name]; ok {
+			m.disableMCP(msg.name, "mcp: "+msg.name+" exited: "+msg.err.Error())
+		}
 		return m, nil
 
 	case ttsFailMsg:
@@ -573,7 +598,7 @@ func (m *tui) endBlock() {
 func (m *tui) toolCallLine(tc llm.ToolCall) string {
 	args := strings.TrimSpace(tc.Function.Arguments)
 	if !m.debug {
-		args = ellipsis(args, max(m.out.Width-len(tc.Function.Name)-6, 10))
+		args = ellipsis(args, max(m.out.Width-ansi.StringWidth(tc.Function.Name)-6, 10))
 	}
 	return toolStyle.Render("⚒ "+tc.Function.Name) + " " + dim.Render(args)
 }
@@ -591,12 +616,17 @@ func (m *tui) toolResultLine(msg llm.Message) string {
 }
 
 // ellipsis shortens a single-line preview. Debug mode skips it.
+//
+// Cells, not bytes: len(s) counts UTF-8 bytes, so an emoji-heavy string
+// compared true and then got sliced mid-rune by s[:width], corrupting the
+// line and throwing off the pane's rendered width — the same class of bug
+// fixed in ui.visibleLen for the pager's scrollbar.
 func ellipsis(s string, width int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= width {
+	if ansi.StringWidth(s) <= width {
 		return s
 	}
-	return s[:width] + "…"
+	return ansi.Truncate(s, width, "…")
 }
 
 func onOff(b bool) string {

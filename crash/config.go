@@ -85,6 +85,12 @@ func LoadConfigs() ([]llm.Config, error) {
 		if m["settings"] != "" {
 			continue // the UI settings record shares this file — see settings.go
 		}
+		if m["mcp"] != "" {
+			continue // an MCP server record shares this file — see mcp.go
+		}
+		if m["tool"] != "" {
+			continue // a built-in tool's toggle record shares this file — see tools.go
+		}
 		provider := m["provider"]
 		if provider == "" {
 			provider = "openai"
@@ -119,6 +125,134 @@ func LoadConfigs() ([]llm.Config, error) {
 	return cfgs, nil
 }
 
+// MCPConfig is one `mcp:` record: a server started as a subprocess and talked
+// to over stdio.
+type MCPConfig struct {
+	Name    string
+	Command string
+	Args    []string
+	Enabled bool
+}
+
+// LoadMCPConfigs reads every `mcp:` record from the same config file
+// LoadConfigs reads providers from. Enabled defaults true — a record with no
+// `enabled` field is on, so a fresh config starts every MCP running.
+func LoadMCPConfigs() ([]MCPConfig, error) {
+	cfgPath, err := configPath()
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("error opening config file %s: %w", cfgPath, err)
+	}
+	defer f.Close()
+
+	var out []MCPConfig
+	for _, rec := range rec_files.Read(f) {
+		m := rec.ToMap(",")
+		name := m["mcp"]
+		if name == "" {
+			continue
+		}
+		out = append(out, MCPConfig{
+			Name:    name,
+			Command: m["command"],
+			Args:    strings.Fields(m["args"]),
+			Enabled: boolField(m["enabled"], true),
+		})
+	}
+	return out, nil
+}
+
+// LoadToolConfigs reads every `tool:` record from the config file. Enabled
+// defaults true — a fresh config starts every tool enabled.
+func LoadToolConfigs() ([]ToolConfig, error) {
+	cfgPath, err := configPath()
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("error opening config file %s: %w", cfgPath, err)
+	}
+	defer f.Close()
+
+	defaults := map[string]bool{
+		"user_choice": true,
+		"bash":        true,
+	}
+	seen := make(map[string]bool)
+	var out []ToolConfig
+	for _, rec := range rec_files.Read(f) {
+		m := rec.ToMap(",")
+		name := m["tool"]
+		if name == "" {
+			continue
+		}
+		seen[name] = true
+		out = append(out, ToolConfig{
+			Name:    name,
+			Enabled: boolField(m["enabled"], defaults[name]),
+		})
+	}
+	for name, enabled := range defaults {
+		if !seen[name] {
+			out = append(out, ToolConfig{Name: name, Enabled: enabled})
+		}
+	}
+	return out, nil
+}
+
+// SaveToolEnabled persists one tool's toggle state in place, in its own
+// `tool:` record, leaving every other record in the file untouched.
+func SaveToolEnabled(name string, enabled bool) error {
+	cfgPath, err := configPath()
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(cfgPath)
+	if err != nil {
+		return err
+	}
+	recs := rec_files.Read(f)
+	f.Close()
+
+	found := false
+	for i, rec := range recs {
+		if rec.ToMap(",")["tool"] == name {
+			recs[i] = setField(rec, "enabled", onOff(enabled))
+			found = true
+		}
+	}
+	if !found {
+		recs = append(recs, rec_files.Record{{Name: "tool", Value: name}, {Name: "enabled", Value: onOff(enabled)}})
+	}
+	return writeRecsAtomically(cfgPath, recs)
+}
+
+// SaveMCPEnabled persists one MCP's toggle state in place, in its own `mcp:`
+// record, leaving every other record in the file untouched.
+func SaveMCPEnabled(name string, enabled bool) error {
+	cfgPath, err := configPath()
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(cfgPath)
+	if err != nil {
+		return err
+	}
+	recs := rec_files.Read(f)
+	f.Close()
+
+	for i, rec := range recs {
+		if rec.ToMap(",")["mcp"] == name {
+			recs[i] = setField(rec, "enabled", onOff(enabled))
+		}
+	}
+	return writeRecsAtomically(cfgPath, recs)
+}
+
 // SaveDefault makes provider/model the default for the next run: it sets the
 // record's `model` field and moves that record first, since the first usable
 // record is what starts the session. Records for other providers keep their own
@@ -150,13 +284,18 @@ func SaveDefault(provider, model string) error {
 		target = rec_files.Record{{Name: "provider", Value: provider}, {Name: "model", Value: model}}
 	}
 	ordered = append([]rec_files.Record{target}, ordered...)
+	return writeRecsAtomically(cfgPath, ordered)
+}
 
-	// Write through a temp file so a failure cannot leave a half-written config.
-	tmp, err := os.CreateTemp(filepath.Dir(cfgPath), ".llm_model.*.rec")
+// writeRecsAtomically writes recs to path through a temp file in the same
+// directory, then renames it into place, so a failure partway through never
+// leaves a half-written config behind.
+func writeRecsAtomically(path string, recs []rec_files.Record) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.*.rec")
 	if err != nil {
 		return err
 	}
-	if err := rec_files.Write(tmp, ordered); err != nil {
+	if err := rec_files.Write(tmp, recs); err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return err
@@ -165,7 +304,7 @@ func SaveDefault(provider, model string) error {
 		os.Remove(tmp.Name())
 		return err
 	}
-	return os.Rename(tmp.Name(), cfgPath)
+	return os.Rename(tmp.Name(), path)
 }
 
 func setField(rec rec_files.Record, name, value string) rec_files.Record {

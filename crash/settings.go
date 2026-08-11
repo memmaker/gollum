@@ -124,23 +124,7 @@ func SaveSettings(s Settings) error {
 		rec = append(rec, rec_files.Field{Name: ttsEnginePrefix + lang, Value: s.TTSEngines[lang]})
 	}
 	recs = append(recs, rec)
-
-	// Written through a temp file, so a failure cannot truncate a config that
-	// also holds the provider setup.
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.*.rec")
-	if err != nil {
-		return err
-	}
-	if err := rec_files.Write(tmp, recs); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return writeRecsAtomically(path, recs)
 }
 
 // boolField reads "on"/"off" — what the menu labels say — and falls back to

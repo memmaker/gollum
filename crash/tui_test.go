@@ -633,3 +633,17 @@ func TestMultilinePageKeys(t *testing.T) {
 		t.Fatalf("pgdown landed on line %d, want back to the bottom (19)", m.multiLine.Line())
 	}
 }
+
+// Wide glyphs are two cells; counting bytes instead used to slice mid-rune
+// and overrun the requested width, the same class of bug the pager's
+// scrollbar had.
+func TestEllipsisCountsWideGlyphsNotBytes(t *testing.T) {
+	s := strings.Repeat("🚀", 20)
+	got := ellipsis(s, 10)
+	if w := ansi.StringWidth(got); w > 11 { // width + the "…" cell
+		t.Fatalf("ellipsis %q is %d cells wide, want <= 11", got, w)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("ellipsis %q missing truncation marker", got)
+	}
+}

@@ -142,3 +142,66 @@ func TestSetToolsEnabled(t *testing.T) {
 		t.Fatalf("re-enabling sent %d tools, want 1", len(p.seenTool[1]))
 	}
 }
+
+// A name collision must not leave two entries with the same name on the
+// wire — that is not "last one wins," it is a duplicate listing a provider
+// may reject outright.
+func TestAddToolReplacesSameName(t *testing.T) {
+	p := &scriptedProvider{streams: [][]Message{{{Role: RoleAssistant, Content: "hi"}}}}
+	s := NewSession(&Client{provider: p}, "")
+	s.AddTool(Tool{Type: "function", Function: ToolFunction{Name: "read", Description: "first"}},
+		func(context.Context, ToolCall) (string, error) { return "first", nil })
+	s.AddTool(Tool{Type: "function", Function: ToolFunction{Name: "read", Description: "second"}},
+		func(context.Context, ToolCall) (string, error) { return "second", nil })
+
+	if len(s.tools) != 1 {
+		t.Fatalf("got %d tools named \"read\", want 1: %+v", len(s.tools), s.tools)
+	}
+	if s.tools[0].Function.Description != "second" {
+		t.Fatalf("surviving definition is %q, want the second registration to win", s.tools[0].Function.Description)
+	}
+
+	ch, err := s.StreamWithTools(context.Background(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	if len(p.seenTool[0]) != 1 {
+		t.Fatalf("sent %d tools named \"read\" on the wire, want 1", len(p.seenTool[0]))
+	}
+
+	result, err := s.executors["read"](context.Background(), ToolCall{})
+	if err != nil || result != "second" {
+		t.Fatalf("executor = (%q, %v), want the second registration's executor to win", result, err)
+	}
+}
+
+// RemoveTool is how an MCP toggled off in the menu stops being offered — it
+// must drop both the wire listing and the executor a stray call would hit.
+func TestRemoveTool(t *testing.T) {
+	p := &scriptedProvider{streams: [][]Message{{{Role: RoleAssistant, Content: "hi"}}}}
+	s := NewSession(&Client{provider: p}, "")
+	s.AddTool(Tool{Type: "function", Function: ToolFunction{Name: "pick"}},
+		func(context.Context, ToolCall) (string, error) { return "cat", nil })
+	s.AddTool(Tool{Type: "function", Function: ToolFunction{Name: "keep"}},
+		func(context.Context, ToolCall) (string, error) { return "kept", nil })
+
+	s.RemoveTool("pick")
+	// Removing a name that was never registered must not panic or touch
+	// anything else.
+	s.RemoveTool("never-registered")
+
+	ch, err := s.StreamWithTools(context.Background(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	if len(p.seenTool[0]) != 1 || p.seenTool[0][0].Function.Name != "keep" {
+		t.Fatalf("offered tools after remove = %+v, want only \"keep\"", p.seenTool[0])
+	}
+	if _, ok := s.executors["pick"]; ok {
+		t.Fatal("removed tool's executor is still registered")
+	}
+}

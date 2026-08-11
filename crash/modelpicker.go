@@ -204,10 +204,15 @@ func (m *tui) toggleSession() {
 func (m *tui) openMenu() {
 	// stay keeps the menu up after the entry ran: a toggle is something you
 	// flip and check, and reopening the menu by hand for that is a chore.
+	// owns marks an entry whose do() fully manages the choice overlay from
+	// here on, including finding its own way back to this menu — the generic
+	// stay/page/choice dispatch below assumes a one-shot picker, which does
+	// not fit a submenu that stays open across repeated toggles.
 	entries := []struct {
 		label string
 		do    func()
 		stay  bool
+		owns  bool
 	}{
 		{"Send tools: " + onOff(m.sess.SendRegisteredTools), func() {
 			m.sess.SendRegisteredTools = !m.sess.SendRegisteredTools
@@ -215,7 +220,7 @@ func (m *tui) openMenu() {
 			m.transcript.WriteString(dim.Render("send tools "+onOff(m.sess.SendRegisteredTools)) + "\n\n")
 			m.setOutput(m.transcript.String())
 			m.out.GotoBottom()
-		}, true},
+		}, true, false},
 		{"Use full output width: " + onOff(ui.MaxWidth == 0), func() {
 			if ui.MaxWidth == 0 {
 				ui.MaxWidth = ui.DefaultMaxWidth
@@ -226,8 +231,8 @@ func (m *tui) openMenu() {
 			m.transcript.WriteString(dim.Render("full output width "+onOff(ui.MaxWidth == 0)) + "\n\n")
 			m.setOutput(m.transcript.String())
 			m.out.GotoBottom()
-		}, true},
-		{"Session: " + onOff(!m.sess.Stateless), m.toggleSession, true},
+		}, true, false},
+		{"Session: " + onOff(!m.sess.Stateless), m.toggleSession, true, false},
 		{"TTS for answers: " + onOff(m.ttsOn), func() {
 			if !m.ttsOn {
 				// Checked now, not at the first answer: a missing engine
@@ -245,7 +250,7 @@ func (m *tui) openMenu() {
 			m.transcript.WriteString(dim.Render("tts for answers "+onOff(m.ttsOn)) + "\n\n")
 			m.setOutput(m.transcript.String())
 			m.out.GotoBottom()
-		}, true},
+		}, true, false},
 		{"TTS language: " + m.ttsLang, func() {
 			langs := sortedKeys(m.ttsEngines)
 			labels := make([]string, len(langs))
@@ -258,14 +263,16 @@ func (m *tui) openMenu() {
 				}
 				m.refreshSidebar()
 			})
-		}, false},
+		}, false, false},
 		{"Show last context", func() {
 			m.page = newPager("context sent with the last request",
 				renderContext(m.sess.LastRequest()), m.width, m.height)
-		}, false},
+		}, false, false},
 		{"Request costs", func() {
 			m.page = newPager("token cost per request", m.stats.String(), m.width, m.height)
-		}, false},
+		}, false, false},
+		{"MCPs", func() { m.openMCPMenu() }, false, true},
+		{"Tools", func() { m.openToolsMenu() }, false, true},
 	}
 	labels := make([]string, len(entries))
 	for i, e := range entries {
@@ -281,6 +288,8 @@ func (m *tui) openMenu() {
 			}
 			entries[i].do()
 			switch {
+			case entries[i].owns:
+				// do() already wired its own way back to this menu.
 			case entries[i].stay:
 				reopen()
 			case m.page != nil:
@@ -300,4 +309,143 @@ func (m *tui) openMenu() {
 		}
 		m.refreshSidebar()
 	})
+}
+
+// openMCPMenu lists every configured MCP with its current on/off state.
+// Unlike the model or TTS-language pickers, it stays open across a toggle
+// instead of resolving to one answer — the same reasoning behind openMenu's
+// "stay" entries — and returns to the main menu itself once cancelled.
+func (m *tui) openMCPMenu() {
+	labels := make([]string, len(m.mcpConfigs))
+	for i, c := range m.mcpConfigs {
+		labels[i] = c.Name + ": " + onOff(c.Enabled)
+	}
+	m.openChoice("MCPs", labels, func(i int) {
+		if i < 0 {
+			m.openMenu()
+			m.refreshSidebar()
+			return
+		}
+		m.toggleMCP(i)
+		m.openMCPMenu()
+		m.choice.Select(i)
+		m.refreshSidebar()
+	})
+}
+
+// toggleMCP flips one configured MCP on or off. Off kills its subprocess and
+// drops its tools from the session; on spawns it fresh, the same path
+// startup uses — a killed server leaves nothing worth resuming.
+func (m *tui) toggleMCP(i int) {
+	cfg := &m.mcpConfigs[i]
+	cfg.Enabled = !cfg.Enabled
+	if err := SaveMCPEnabled(cfg.Name, cfg.Enabled); err != nil {
+		m.note = "mcp: could not save " + cfg.Name + ": " + err.Error()
+	}
+
+	if !cfg.Enabled {
+		m.stopMCP(cfg.Name)
+		return
+	}
+
+	c, err := spawnMCP(*cfg)
+	if err != nil {
+		cfg.Enabled = false
+		m.note = "mcp: " + err.Error()
+		return
+	}
+	m.mcpClients[cfg.Name] = c
+	registerMCPTools(m.sess, c)
+}
+
+// stopMCP kills a running client and drops its tools from the session. Safe
+// to call for a name with no running client.
+func (m *tui) stopMCP(name string) {
+	c, ok := m.mcpClients[name]
+	if !ok {
+		return
+	}
+	for _, t := range c.tools {
+		m.sess.RemoveTool(t.Name)
+	}
+	c.close()
+	delete(m.mcpClients, name)
+}
+
+// disableMCP brings the menu and session back in step after an MCP's
+// connection is found dead mid-session: its config is flipped off (in
+// memory only — a transient crash should not permanently disable it in the
+// saved config, matching how a startup spawn failure is handled) and its
+// tools are dropped, same as toggling it off by hand.
+func (m *tui) disableMCP(name, note string) {
+	for i := range m.mcpConfigs {
+		if m.mcpConfigs[i].Name == name {
+			m.mcpConfigs[i].Enabled = false
+			break
+		}
+	}
+	m.stopMCP(name)
+	m.note = note
+	m.refreshSidebar()
+}
+
+// openToolsMenu lists every built-in tool with its current on/off state.
+// Like openMCPMenu, it stays open across toggles and returns to the main menu
+// when cancelled.
+func (m *tui) openToolsMenu() {
+	labels := make([]string, len(m.toolConfigs))
+	for i, c := range m.toolConfigs {
+		labels[i] = c.Name + ": " + onOff(c.Enabled)
+	}
+	m.openChoice("Tools", labels, func(i int) {
+		if i < 0 {
+			m.openMenu()
+			m.refreshSidebar()
+			return
+		}
+		m.toggleTool(i)
+		m.openToolsMenu()
+		m.choice.Select(i)
+		m.refreshSidebar()
+	})
+}
+
+// toggleTool flips one tool on or off and updates the session.
+func (m *tui) toggleTool(i int) {
+	cfg := &m.toolConfigs[i]
+	cfg.Enabled = !cfg.Enabled
+	if err := SaveToolEnabled(cfg.Name, cfg.Enabled); err != nil {
+		m.note = "tool: could not save " + cfg.Name + ": " + err.Error()
+		return
+	}
+
+	m.sess.RemoveTool(cfg.Name)
+	registerTools(m.sess, m.toolConfigs)
+
+	m.transcript.WriteString(dim.Render("tool "+cfg.Name+" "+onOff(cfg.Enabled)) + "\n\n")
+	m.setOutput(m.transcript.String())
+	m.out.GotoBottom()
+}
+
+// toolListing renders "Tools": every tool currently offered to the model,
+// grouped by where it came from.
+func (m *tui) toolListing() string {
+	var b strings.Builder
+	b.WriteString(label.Render("built-in") + "\n")
+	for _, cfg := range m.toolConfigs {
+		if cfg.Enabled {
+			b.WriteString("  " + cfg.Name + "\n")
+		}
+	}
+	for _, cfg := range m.mcpConfigs {
+		c, ok := m.mcpClients[cfg.Name]
+		if !cfg.Enabled || !ok {
+			continue
+		}
+		b.WriteString("\n" + label.Render(cfg.Name) + "\n")
+		for _, t := range c.tools {
+			b.WriteString("  " + t.Name + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
