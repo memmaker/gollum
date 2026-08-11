@@ -699,13 +699,13 @@ func (m *tui) layout(w, h int) {
 	}
 
 	// The one-line prompt spends a single row; the multiline box grows with
-	// its content and spends one more on the delimiter rule above it.
-	inputH, delim := oneLineHeight, 0
+	// its content and spends two more on its own top and bottom border.
+	inputH, border := oneLineHeight, 0
 	if m.multiline {
-		delim = delimiterHeight
-		inputH = inputHeight(wrappedRows(m.value(), w), h)
+		border = multilineBorderRows
+		inputH = inputHeight(wrappedRows(m.value(), w-multilineBorderCols), h)
 	}
-	paneH := max(h-inputH-delim-helpHeight-animHeight, 3)
+	paneH := max(h-inputH-border-helpHeight-animHeight, 3)
 	// Each pane spends one column on its scrollbar.
 	outW := max(w-side-1, 10)
 	sideW := max(side-1, 1)
@@ -806,11 +806,6 @@ func (m *tui) View() string {
 		return m.page.view(m.help)
 	}
 	rows := []string{animBar(m.width, m.frame, m.stream != nil), panes}
-	if m.multiline {
-		// The rule stands in for the border the panes lost: it says where the
-		// output ends and the box that is about to grow begins.
-		rows = append(rows, strings.Repeat("─", m.width))
-	}
 	view := lipgloss.JoinVertical(lipgloss.Left,
 		append(rows, m.inputView(), m.helpLine())...,
 	)

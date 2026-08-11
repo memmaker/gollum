@@ -4,8 +4,8 @@ import "testing"
 
 // The multiline box's height is the only non-trivial arithmetic the input
 // mode adds: grow with content, floor at 3, and never crowd the animation
-// bar, the output pane's own floor, the delimiter, or the help line off a
-// short terminal.
+// bar, the output pane's own floor, the box's own border rows, or the help
+// line off a short terminal.
 func TestInputHeight(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -16,9 +16,9 @@ func TestInputHeight(t *testing.T) {
 		{"empty content rests at the floor", 0, 40, 3},
 		{"one line rests at the floor", 1, 40, 3},
 		{"grows with content", 4, 40, 4},
-		{"capped before it crowds the frame", 200, 40, 34}, // 40-1-3-1-1
-		{"tiny terminal shrinks below the floor", 4, 8, 2}, // 8-1-3-1-1
-		{"terminal too short even for one row floors at 1", 1, 4, 1},
+		{"capped before it crowds the frame", 200, 40, 33}, // 40-1-3-2-1
+		{"tiny terminal shrinks below the floor", 4, 9, 2}, // 9-1-3-2-1
+		{"terminal too short even for one row floors at 1", 1, 6, 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

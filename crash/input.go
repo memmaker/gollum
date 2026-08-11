@@ -13,12 +13,15 @@ import (
 // The prompt has two shapes. Most of the time it is a single row — a
 // textinput scrolls horizontally rather than wrap, so a long line stays one
 // line, same as a shell. ctrl+space swaps in a textarea that grows with the
-// content, for a prompt worth seeing in full before it is sent.
+// content, for a prompt worth seeing in full before it is sent. Its rounded
+// border stands in for the delimiter a plain rule would have drawn, and
+// spends the same rows and columns a rule plus its own edges would have.
 const (
-	oneLineHeight      = 1 // the default prompt: one row, no wrap
-	delimiterHeight    = 1 // rule between the output and an open multiline box
-	minMultilineHeight = 3 // floor the box rests at, empty or freshly opened
-	outputFloor        = 3 // rows the output pane keeps even at max multiline height
+	oneLineHeight       = 1 // the default prompt: one row, no wrap
+	multilineBorderRows = 2 // the box's own top and bottom border edges
+	multilineBorderCols = 2 // the box's own left and right border edges
+	minMultilineHeight  = 3 // floor the box's content rests at, border excluded
+	outputFloor         = 3 // rows the output pane keeps even at max multiline height
 )
 
 // inputPlaceholder hints at the slash commands from whichever box is empty.
@@ -124,19 +127,26 @@ func (m *tui) blurInput() {
 	m.multiLine.Cursor.SetMode(cursor.CursorHide)
 }
 
-// inputView renders whichever widget is active.
+// inputView renders whichever widget is active. The multiline box gets a
+// rounded border on all four edges, in the accent colour while it has focus —
+// the same convention the modal overlay's border already uses.
 func (m *tui) inputView() string {
 	if m.multiline {
-		return m.multiLine.View()
+		style := borderStyle
+		if m.focus == paneInput {
+			style = focusedStyle
+		}
+		return style.Render(m.multiLine.View())
 	}
 	return m.oneLine.View()
 }
 
 // setInputWidth sizes both widgets to the terminal width, so a toggle
-// mid-resize never shows a stale one.
+// mid-resize never shows a stale one. The multiline box gives up two columns
+// to its own left and right border edges.
 func (m *tui) setInputWidth(w int) {
 	m.oneLine.Width = max(w-ansi.StringWidth(m.oneLine.Prompt), 1)
-	m.multiLine.SetWidth(w)
+	m.multiLine.SetWidth(max(w-multilineBorderCols, 1))
 }
 
 // toggleMultiline flips the input between its one-row prompt and the growing
@@ -166,13 +176,13 @@ func (m *tui) toggleMultiline() {
 	m.layout(m.width, m.height)
 }
 
-// inputHeight is how tall the multiline box stands: it grows with the
-// content between its floor and a ceiling that leaves the animation bar,
-// three rows of output, the delimiter rule, and the help line standing. A
-// terminal too short for all of that shrinks the box below its own floor
-// rather than push those rows negative.
+// inputHeight is how tall the multiline box's content stands, border
+// excluded: it grows with the content between its floor and a ceiling that
+// leaves the animation bar, three rows of output, the box's own border rows,
+// and the help line standing. A terminal too short for all of that shrinks
+// the box below its own floor rather than push those rows negative.
 func inputHeight(wrapped, termHeight int) int {
-	ceiling := termHeight - animHeight - outputFloor - delimiterHeight - helpHeight
+	ceiling := termHeight - animHeight - outputFloor - multilineBorderRows - helpHeight
 	h := max(wrapped, minMultilineHeight)
 	if h > ceiling {
 		h = ceiling
