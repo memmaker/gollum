@@ -41,7 +41,9 @@ func newMultiLineInput() textarea.Model {
 	ta := textarea.New()
 	ta.Placeholder = inputPlaceholder
 	ta.ShowLineNumbers = false
-	ta.Prompt = "▏"
+	// The border already marks the box's edge; a prompt glyph on every line
+	// would just repeat that down the left side.
+	ta.Prompt = ""
 	ta.SetHeight(minMultilineHeight)
 	// The default cursor line paints its own background, which shows up as a
 	// block behind the placeholder. Let the terminal background through.
