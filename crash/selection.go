@@ -118,7 +118,7 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 			return nil
 		}
 		m.focus = p
-		m.input.Blur()
+		m.blurInput()
 		line := m.viewportFor(p).YOffset + row
 		m.sel = selection{pane: p, from: line, to: line, active: true, set: true}
 

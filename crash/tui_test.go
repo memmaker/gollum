@@ -7,7 +7,6 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -60,12 +59,10 @@ func TestScrollbar(t *testing.T) {
 // The overlay must sit inside the frame without pushing rows or columns
 // around: a modal that resizes the screen means the compositing is wrong.
 func TestChoiceOverlay(t *testing.T) {
-	ta := textarea.New()
-	ta.SetHeight(2)
 	m := &tui{
 		sess:    llm.NewSession(nil, ""),
 		cfgs:    []llm.Config{{Provider: "openai", Model: "gpt-5-mini"}},
-		input:   ta,
+		oneLine: newOneLineInput(), multiLine: newMultiLineInput(),
 		help:    help.New(),
 		current: "openai/gpt-5-mini",
 	}
@@ -102,8 +99,7 @@ func TestChoiceOverlay(t *testing.T) {
 // Filtering runs as a command whose result comes back as a message, and it
 // renumbers the rows: both are easy to drop, and both make the wrong item win.
 func TestChoiceFilterAndPick(t *testing.T) {
-	ta := textarea.New()
-	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, input: ta, help: help.New()}
+	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
 	m.layout(100, 30)
 
 	picked := -99
@@ -169,8 +165,7 @@ func TestSubstringFilter(t *testing.T) {
 // pagination and help rows from the height it is given, so a box sized to the
 // item count alone paginates one item at a time.
 func TestChoiceFitsOnePage(t *testing.T) {
-	ta := textarea.New()
-	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, input: ta, help: help.New()}
+	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
 	m.layout(100, 30)
 
 	m.openChoice("pick an animal", []string{"cat", "dog", "owl", "bat", "eel"}, func(int) {})
@@ -195,8 +190,7 @@ func TestChoiceFitsOnePage(t *testing.T) {
 // Tool activity is drawn where it happened: after the text that preceded it,
 // with the result under its call. /debug decides how much of each is shown.
 func TestToolCallRendering(t *testing.T) {
-	ta := textarea.New()
-	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, input: ta, help: help.New(), raw: true}
+	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(), raw: true}
 	m.layout(100, 30)
 
 	long := `{"question":"pick an animal","options":["cat","dog","owl","bat","eel"]}`
@@ -237,8 +231,7 @@ func TestToolCallRendering(t *testing.T) {
 // Assistant text that resumes after a tool result must start its own block,
 // whatever trailing newlines the previous writer happened to leave.
 func TestAnswerStartsNewBlockAfterTool(t *testing.T) {
-	ta := textarea.New()
-	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, input: ta, help: help.New(), raw: true}
+	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(), raw: true}
 	m.layout(100, 30)
 
 	m.chunk(llm.Message{Role: llm.RoleTool, Name: "user_choice", Content: "cat"})
@@ -284,8 +277,7 @@ func TestAnimBar(t *testing.T) {
 
 // The menu entry both shows the toggle's state and flips it.
 func TestMenuToggleSendTools(t *testing.T) {
-	ta := textarea.New()
-	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, input: ta, help: help.New()}
+	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
 	m.layout(100, 30)
 
 	m.openMenu()
@@ -310,8 +302,7 @@ func TestMenuToggleSendTools(t *testing.T) {
 // Copying has to yield plain text from one pane only, and the highlight has
 // to survive a scroll (it is anchored to content lines, not screen rows).
 func TestSelectionCopiesPlainLines(t *testing.T) {
-	ta := textarea.New()
-	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, input: ta, help: help.New(), raw: true}
+	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(), raw: true}
 	m.layout(100, 30)
 	m.transcript.WriteString(label.Render("styled one") + "\nplain two\nplain three\n")
 	m.redraw()
@@ -422,12 +413,12 @@ func TestFinishTurnScrollsToPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &tui{ctx: context.Background(), sess: llm.NewSession(client, ""), input: textarea.New(), help: help.New(), raw: true}
+	m := &tui{ctx: context.Background(), sess: llm.NewSession(client, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(), raw: true}
 	m.layout(100, 20)
 	// An earlier turn, so the interesting offset is not zero.
 	m.transcript.WriteString(strings.Repeat("old\n", 30))
 
-	m.input.SetValue("ask something")
+	m.setValue("ask something")
 	m.submit()
 	m.produced = true
 	m.chunk(llm.Message{Content: strings.Repeat("answer line\n", 40)})
@@ -442,7 +433,7 @@ func TestFinishTurnScrollsToPrompt(t *testing.T) {
 // A toggle leaves the menu up with its label refreshed, so it can be flipped
 // again without reopening; a pager entry closes it.
 func TestMenuTogglesStayOpen(t *testing.T) {
-	m := &tui{sess: llm.NewSession(nil, ""), input: textarea.New(), help: help.New()}
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
 	m.layout(100, 30)
 
 	m.openMenu()
@@ -469,7 +460,7 @@ func TestMenuTogglesStayOpen(t *testing.T) {
 // Closing a pager or a submenu opened from the menu comes back to the menu,
 // on the entry it was opened from, rather than dropping to the prompt.
 func TestMenuReturnsFromPagerAndSubmenu(t *testing.T) {
-	m := &tui{sess: llm.NewSession(nil, ""), input: textarea.New(), help: help.New()}
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
 	m.layout(100, 30)
 
 	m.openMenu()
@@ -518,16 +509,16 @@ func menuEntry(t *testing.T, m *tui, prefix string) int {
 // ctrl+s flips the session from anywhere, so it works while the prompt has
 // focus and a half-typed question in it.
 func TestSessionHotkey(t *testing.T) {
-	m := &tui{sess: llm.NewSession(nil, ""), input: textarea.New(), help: help.New()}
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
 	m.layout(100, 30)
 	m.focus = paneInput
-	m.input.SetValue("half typed")
+	m.setValue("half typed")
 
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if !m.sess.Stateless {
 		t.Fatal("ctrl+s did not turn the session off")
 	}
-	if got := m.input.Value(); got != "half typed" {
+	if got := m.value(); got != "half typed" {
 		t.Fatalf("the prompt lost its text: %q", got)
 	}
 	if !strings.Contains(ansi.Strip(m.logo), oblivium) {
@@ -540,5 +531,75 @@ func TestSessionHotkey(t *testing.T) {
 	}
 	if strings.Contains(ansi.Strip(m.logo), oblivium) {
 		t.Fatal("the marker outlived the session being turned back on")
+	}
+}
+
+// ctrl+space opens the multiline box with the one-line draft carried over,
+// the box grows as its content wraps past its floor, and sending shrinks it
+// back down — the full round trip the height arithmetic exists for.
+func TestMultilineToggleGrowsAndShrinks(t *testing.T) {
+	// A client pointing nowhere: submit's send fails in the background, which
+	// is all this test needs — the box's own height bookkeeping runs either way.
+	client, err := llm.New(llm.Config{Provider: "openai", APIKey: "x", BaseURL: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &tui{ctx: context.Background(), sess: llm.NewSession(client, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(30, 20)
+	m.focus = paneInput
+	m.setValue("draft")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlAt}) // ctrl+space
+	if !m.multiline {
+		t.Fatal("ctrl+space did not open the multiline box")
+	}
+	if got := m.value(); got != "draft" {
+		t.Fatalf("the draft was lost on toggle: %q", got)
+	}
+	if got := m.multiLine.Height(); got != minMultilineHeight {
+		t.Fatalf("box opened at height %d, want the floor %d", got, minMultilineHeight)
+	}
+
+	// Enough text to wrap past the floor grows the box.
+	long := strings.Repeat("a very long word ", 20)
+	m.setValue(long)
+	m.layout(m.width, m.height)
+	if got := m.multiLine.Height(); got <= minMultilineHeight {
+		t.Fatalf("box stayed at %d with content that overruns it", got)
+	}
+
+	// alt+enter sends in multiline mode and the box shrinks back to its floor.
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	if got := m.value(); got != "" {
+		t.Fatalf("box still holds %q after sending", got)
+	}
+	if got := m.multiLine.Height(); got != minMultilineHeight {
+		t.Fatalf("box rests at %d after sending, want the floor %d", got, minMultilineHeight)
+	}
+}
+
+// Toggling a multi-line draft down to the one-row box must not lose the line
+// breaks: textinput's own sanitizer silently turns a newline into a space,
+// so the box folds them behind a visible marker instead, and toggling
+// straight back up (untouched) must get the exact text back.
+func TestMultilineToggleDoesNotLoseNewlines(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(60, 20)
+	m.focus = paneInput
+
+	m.toggleMultiline()
+	m.setValue("line one\nline two\nline three")
+	m.toggleMultiline() // down to one-line
+
+	if m.value() != "line one\nline two\nline three" {
+		t.Fatalf("folded value() = %q, want the original text back", m.value())
+	}
+	if strings.Contains(m.oneLine.Value(), "\n") {
+		t.Fatal("a real newline reached the one-row widget")
+	}
+
+	m.toggleMultiline() // back up, untouched since folding
+	if got := m.multiLine.Value(); got != "line one\nline two\nline three" {
+		t.Fatalf("multiline value after round trip = %q", got)
 	}
 }

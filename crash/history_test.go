@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/memmaker/gollum/llm"
@@ -15,10 +14,7 @@ import (
 
 func historyTUI(t *testing.T, past ...string) *tui {
 	t.Helper()
-	ta := textarea.New()
-	ta.SetHeight(2)
-	ta.Focus()
-	m := &tui{sess: llm.NewSession(nil, ""), input: ta, help: help.New(), history: past}
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(), history: past}
 	m.histAt = len(m.history)
 	m.layout(100, 30)
 	return m
@@ -28,27 +24,27 @@ func historyTUI(t *testing.T, past ...string) *tui {
 // until the half-typed draft comes back.
 func TestHistoryWalk(t *testing.T) {
 	m := historyTUI(t, "first", "second")
-	m.input.SetValue("half typed")
+	m.setValue("half typed")
 
 	m.recall(-1)
-	if got := m.input.Value(); got != "second" {
+	if got := m.value(); got != "second" {
 		t.Fatalf("one up gave %q, want the newest entry", got)
 	}
 	m.recall(-1)
-	if got := m.input.Value(); got != "first" {
+	if got := m.value(); got != "first" {
 		t.Fatalf("two up gave %q, want the oldest entry", got)
 	}
 	m.recall(-1) // past the oldest: stays put
-	if got := m.input.Value(); got != "first" {
+	if got := m.value(); got != "first" {
 		t.Fatalf("up past the end gave %q", got)
 	}
 	m.recall(1)
 	m.recall(1)
-	if got := m.input.Value(); got != "half typed" {
+	if got := m.value(); got != "half typed" {
 		t.Fatalf("walking back down gave %q, want the draft restored", got)
 	}
 	m.recall(1) // past the draft: nothing newer
-	if got := m.input.Value(); got != "half typed" {
+	if got := m.value(); got != "half typed" {
 		t.Fatalf("down past the draft gave %q", got)
 	}
 }
@@ -90,41 +86,38 @@ func TestHistoryRemembers(t *testing.T) {
 	}
 }
 
-// The key routing: up recalls only from the first line, so a prompt that spans
-// lines can still be navigated with the cursor.
+// The key routing: the one-line prompt has no lines for the cursor to walk,
+// so up and down always recall there. The multiline box is the opposite —
+// they only ever move the cursor, so a long draft is never lost to a stray
+// arrow key.
 func TestHistoryKeys(t *testing.T) {
 	m := historyTUI(t, "earlier")
 	m.focus = paneInput
 
 	up := tea.KeyMsg{Type: tea.KeyUp}
 	m.Update(up)
-	if got := m.input.Value(); got != "earlier" {
+	if got := m.value(); got != "earlier" {
 		t.Fatalf("up on an empty box gave %q, want the last prompt", got)
 	}
 
-	// Two lines in the box: the cursor is on the second, so up belongs to it.
+	// Open the multiline box with a two-line draft: up and down move the
+	// cursor and never touch history.
 	m = historyTUI(t, "earlier")
 	m.focus = paneInput
-	m.input.SetValue("one\ntwo")
-	m.input.CursorEnd()
-	if m.input.Line() != 1 {
-		t.Fatalf("cursor is on line %d, want the second", m.input.Line())
+	m.toggleMultiline()
+	m.setValue("one\ntwo")
+	if m.multiLine.Line() != 1 {
+		t.Fatalf("cursor is on line %d, want the second", m.multiLine.Line())
 	}
 	m.Update(up)
-	if got := m.input.Value(); got != "one\ntwo" {
-		t.Fatalf("up mid-prompt replaced the text with %q", got)
+	if got := m.value(); got != "one\ntwo" {
+		t.Fatalf("up in the multiline box replaced the text with %q", got)
 	}
-	if m.input.Line() != 0 {
-		t.Fatal("up mid-prompt did not move the cursor")
+	if m.multiLine.Line() != 0 {
+		t.Fatal("up in the multiline box did not move the cursor")
 	}
-	// Now on the first line, up reaches the history — and the two-line draft
-	// comes back on the way down.
-	m.Update(up)
-	if got := m.input.Value(); got != "earlier" {
-		t.Fatalf("up from the first line gave %q", got)
-	}
-	m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if got := m.input.Value(); got != "one\ntwo" {
-		t.Fatalf("down gave %q, want the draft back", got)
+	m.Update(up) // still the first line: nowhere left to go, still no recall
+	if got := m.value(); got != "one\ntwo" {
+		t.Fatalf("up at the top of the multiline box gave %q, want the draft untouched", got)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -31,7 +32,6 @@ const (
 	// pane width exactly, no slack either side. Dropped entirely on a narrow
 	// terminal.
 	sidebarWidth = logoWidth + 1
-	inputHeight  = 2 // two edit lines
 	animHeight   = 1 // the bar across the top
 	helpHeight   = 1
 )
@@ -49,20 +49,31 @@ const (
 )
 
 type keymap struct {
-	send, newline, next, up, down, top, bottom, quit, pick, cancel, menu, history, session key.Binding
+	send, altEnter, newlineHint, multiline, oneLineHint, next, up, down, top, bottom, quit, pick, cancel, menu, history, session key.Binding
 }
 
 var keys = keymap{
-	send:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
-	newline: key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "newline")),
-	next:    key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next pane")),
-	up:      key.NewBinding(key.WithKeys("up", "k", "pgup"), key.WithHelp("↑/pgup", "scroll up")),
-	down:    key.NewBinding(key.WithKeys("down", "j", "pgdown"), key.WithHelp("↓/pgdn", "scroll down")),
-	top:     key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
-	bottom:  key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
-	quit:    key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
-	pick:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "choose")),
-	cancel:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel")),
+	// enter sends in the one-line prompt; in the multiline box it is left to
+	// fall through to the textarea's own default of inserting a newline.
+	send: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+	// alt+enter is the multiline box's send key — the opposite of enter there,
+	// so a box that looks like an editor keeps enter meaning "newline".
+	altEnter: key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "send")),
+	// Never matched against a key — shown in the multiline help line only, to
+	// say what plain enter does there since nothing else states it.
+	newlineHint: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "newline")),
+	multiline:   key.NewBinding(key.WithKeys("ctrl+@"), key.WithHelp("ctrl+space", "multiline")),
+	// Same key as multiline — matched nowhere, shown in its help line instead,
+	// to name where it is about to send you back to.
+	oneLineHint: key.NewBinding(key.WithKeys("ctrl+@"), key.WithHelp("ctrl+space", "one-line")),
+	next:        key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next pane")),
+	up:          key.NewBinding(key.WithKeys("up", "k", "pgup"), key.WithHelp("↑/pgup", "scroll up")),
+	down:        key.NewBinding(key.WithKeys("down", "j", "pgdown"), key.WithHelp("↓/pgdn", "scroll down")),
+	top:         key.NewBinding(key.WithKeys("g", "home"), key.WithHelp("g", "top")),
+	bottom:      key.NewBinding(key.WithKeys("G", "end"), key.WithHelp("G", "bottom")),
+	quit:        key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+	pick:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "choose")),
+	cancel:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel")),
 	// Not ctrl+m: terminals send CR for that, which is the same byte as enter.
 	menu:    key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "menu")),
 	session: key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "session")),
@@ -106,10 +117,16 @@ type tui struct {
 	cfgs []llm.Config
 	raw  bool
 
-	out   viewport.Model
-	side  viewport.Model
-	input textarea.Model
-	help  help.Model
+	out       viewport.Model
+	side      viewport.Model
+	oneLine   textinput.Model
+	multiLine textarea.Model
+	multiline bool // true while the multiline box (ctrl+space) is open
+	// foldedDisplay/foldedOrig remember a multiline draft folded into the
+	// one-row box (newlineFold in place of its line breaks) and the original
+	// text with them intact, so toggling straight back up restores it exactly.
+	foldedDisplay, foldedOrig string
+	help                      help.Model
 
 	width, height int
 	focus         pane
@@ -167,25 +184,16 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 	sess.Timeout = cfgs[0].Timeout
 	registerTools(sess)
 
-	ta := textarea.New()
-	ta.Placeholder = "ask something — /model, /debug, /exit"
-	ta.ShowLineNumbers = false
-	ta.Prompt = "▏"
-	ta.SetHeight(2)
-	ta.Focus()
-	// Enter submits, so the textarea must not consume it as a newline.
-	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"))
-	// The default cursor line paints its own background, which shows up as a
-	// block behind the placeholder. Let the terminal background through.
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	oneLine := newOneLineInput()
+	oneLine.Focus()
 
 	m := &tui{
 		ctx:        ctx,
 		sess:       sess,
 		cfgs:       cfgs,
 		raw:        raw,
-		input:      ta,
+		oneLine:    oneLine,
+		multiLine:  newMultiLineInput(),
 		help:       help.New(),
 		current:    cfgs[0].Provider + "/" + model,
 		ttsOn:      settings.TTSAnswers,
@@ -207,7 +215,7 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 	}
 }
 
-func (m *tui) Init() tea.Cmd { return textarea.Blink }
+func (m *tui) Init() tea.Cmd { return cursor.Blink }
 
 func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -314,23 +322,35 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.focus == paneInput {
-			if key.Matches(msg, keys.send) {
+			if key.Matches(msg, keys.multiline) {
+				m.toggleMultiline()
+				return m, nil
+			}
+			if !m.multiline && key.Matches(msg, keys.send) {
 				return m, m.submit()
 			}
-			// Up and down walk the history from the edges of the box, so they
-			// still move the cursor inside a prompt that spans lines. Matched
-			// on the key itself, not keys.up: "k" is a scroll binding for the
-			// other panes and a letter in this one.
-			if msg.Type == tea.KeyUp && m.input.Line() == 0 {
-				m.recall(-1)
-				return m, nil
+			if m.multiline && key.Matches(msg, keys.altEnter) {
+				return m, m.submit()
 			}
-			if msg.Type == tea.KeyDown && m.input.Line() == m.input.LineCount()-1 {
-				m.recall(1)
-				return m, nil
+			if !m.multiline {
+				// A single row has no lines for the cursor to walk, so up and
+				// down always recall — there is nothing else for them to do.
+				if msg.Type == tea.KeyUp {
+					m.recall(-1)
+					return m, nil
+				}
+				if msg.Type == tea.KeyDown {
+					m.recall(1)
+					return m, nil
+				}
+				var cmd tea.Cmd
+				m.oneLine, cmd = m.oneLine.Update(msg)
+				return m, cmd
 			}
 			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
+			m.multiLine, cmd = m.multiLine.Update(msg)
+			// The box grows and shrinks with its content as you type.
+			m.layout(m.width, m.height)
 			return m, cmd
 		}
 		return m, m.scroll(msg)
@@ -347,11 +367,12 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // submit acts on whatever is in the input box: a slash command, or a prompt.
 func (m *tui) submit() tea.Cmd {
-	text := strings.TrimSpace(m.input.Value())
+	text := strings.TrimSpace(m.value())
 	if text == "" || m.stream != nil {
 		return nil
 	}
-	m.input.Reset()
+	m.resetInput()
+	m.layout(m.width, m.height) // the multiline box shrinks back to its floor
 	m.remember(text)
 	m.endRecall()
 
@@ -643,14 +664,10 @@ func (m *tui) closeChoice(idx int) {
 func (m *tui) cycleFocus() {
 	m.focus = (m.focus + 1) % 3
 	if m.focus == paneInput {
-		m.input.Cursor.SetMode(cursor.CursorBlink)
-		m.input.Focus()
+		m.focusInput()
 		return
 	}
-	// A blurred textarea still draws its cursor block, which reads as two
-	// carets on screen once a pane takes focus.
-	m.input.Blur()
-	m.input.Cursor.SetMode(cursor.CursorHide)
+	m.blurInput()
 }
 
 // scroll routes a key to whichever pane has focus.
@@ -680,7 +697,15 @@ func (m *tui) layout(w, h int) {
 	if w < 90 {
 		side = 0 // no room for two panes; the sidebar is the one to lose
 	}
-	paneH := max(h-inputHeight-helpHeight-animHeight, 3)
+
+	// The one-line prompt spends a single row; the multiline box grows with
+	// its content and spends one more on the delimiter rule above it.
+	inputH, delim := oneLineHeight, 0
+	if m.multiline {
+		delim = delimiterHeight
+		inputH = inputHeight(wrappedRows(m.value(), w), h)
+	}
+	paneH := max(h-inputH-delim-helpHeight-animHeight, 3)
 	// Each pane spends one column on its scrollbar.
 	outW := max(w-side-1, 10)
 	sideW := max(side-1, 1)
@@ -694,6 +719,9 @@ func (m *tui) layout(w, h int) {
 		sideH = paneH - lipgloss.Height(m.logo)
 	}
 
+	// A pane already scrolled to the newest line stays there through the
+	// resize; one scrolled back to read something earlier is left alone.
+	atBottom := m.ready && m.out.AtBottom()
 	if !m.ready {
 		m.out = viewport.New(outW, paneH)
 		m.side = viewport.New(sideW, sideH)
@@ -702,7 +730,14 @@ func (m *tui) layout(w, h int) {
 		m.out.Width, m.out.Height = outW, paneH
 		m.side.Width, m.side.Height = sideW, sideH
 	}
-	m.input.SetWidth(w)
+	if atBottom {
+		m.out.GotoBottom()
+	}
+
+	m.setInputWidth(w)
+	if m.multiline {
+		m.multiLine.SetHeight(inputH)
+	}
 	m.help.Width = w
 	m.setOutput(m.transcript.String() + m.answer.String())
 	m.refreshSidebar()
@@ -770,11 +805,14 @@ func (m *tui) View() string {
 	if m.page != nil {
 		return m.page.view(m.help)
 	}
+	rows := []string{animBar(m.width, m.frame, m.stream != nil), panes}
+	if m.multiline {
+		// The rule stands in for the border the panes lost: it says where the
+		// output ends and the box that is about to grow begins.
+		rows = append(rows, strings.Repeat("─", m.width))
+	}
 	view := lipgloss.JoinVertical(lipgloss.Left,
-		animBar(m.width, m.frame, m.stream != nil),
-		panes,
-		m.input.View(),
-		m.helpLine(),
+		append(rows, m.inputView(), m.helpLine())...,
 	)
 	if box := m.choiceView(); box != "" {
 		x, y := m.modalPos(box)
@@ -841,7 +879,11 @@ func (m *tui) helpLine() string {
 	}
 	switch m.focus {
 	case paneInput:
-		b = []key.Binding{keys.send, keys.newline, keys.history, keys.next, keys.menu, keys.quit}
+		if m.multiline {
+			b = []key.Binding{keys.altEnter, keys.newlineHint, keys.oneLineHint, keys.next, keys.menu, keys.quit}
+		} else {
+			b = []key.Binding{keys.send, keys.history, keys.multiline, keys.next, keys.menu, keys.quit}
+		}
 	default:
 		b = []key.Binding{keys.up, keys.down, keys.top, keys.bottom, keys.next, keys.menu, keys.quit}
 	}

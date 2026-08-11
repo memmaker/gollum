@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/memmaker/gollum/llm"
@@ -14,7 +13,7 @@ import (
 // Nothing in the sidebar may run past its edge, not even an unbroken word: a
 // model slug is one long token and used to be cut off mid-name.
 func TestSidebarWraps(t *testing.T) {
-	m := &tui{sess: llm.NewSession(nil, ""), input: textarea.New(), help: help.New(),
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(),
 		current: strings.Repeat("x", 60)}
 	m.layout(100, 24)
 	m.note = "error: some backend said something quite long about a token"

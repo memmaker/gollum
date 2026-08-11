@@ -76,7 +76,7 @@ func (m *tui) recall(delta int) {
 		if delta > 0 {
 			return // already at the draft: there is nothing newer
 		}
-		m.draft = m.input.Value()
+		m.draft = m.value()
 	}
 	at := m.histAt + delta
 	if at < 0 {
@@ -90,11 +90,10 @@ func (m *tui) recall(delta int) {
 	}
 	m.histAt = at
 	if at == len(m.history) {
-		m.input.SetValue(m.draft)
+		m.setValue(m.draft)
 	} else {
-		m.input.SetValue(m.history[at])
+		m.setValue(m.history[at])
 	}
-	m.input.CursorEnd()
 }
 
 // endRecall leaves the history walk, so the next up starts from the newest

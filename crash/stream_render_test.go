@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/memmaker/gollum/llm"
@@ -14,7 +13,7 @@ import (
 // A finished paragraph is rendered while the next one is still arriving, and
 // the answer that ends up in the transcript is the same text either way.
 func TestStreamingSettlesFinishedBlocks(t *testing.T) {
-	m := &tui{sess: llm.NewSession(nil, ""), input: textarea.New(), help: help.New()}
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
 	m.layout(100, 20)
 
 	for _, part := range []string{"# Title\n", "\nSome **bold** text.\n", "\nStill wri"} {
