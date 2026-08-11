@@ -1,0 +1,53 @@
+# crash colour palette. Read from ./colors.rec, else ~/.config/gollum/colors.rec.
+# Values are terminal palette indexes (0-255) or hex like #ff1a1a. The two
+# anim_* colours are gradient endpoints and must be hex — an index cannot be
+# blended. Any entry may be left out: the built-in default stands.
+
+# Pane borders. Unfocused panes and every other framed box.
+name: border
+value: 240
+
+# Muted text: status notes, tool results, the diagonal field around the logo.
+name: dim
+value: 240
+
+# The accent: sidebar labels, focused borders, the prompt marker. Amber, as in
+# the P3 phosphor of an old terminal tube.
+name: accent
+value: #ffb000
+
+# Text drawn on top of the accent: the overlay title bar. Needs to stay
+# readable against it, so it is dark by default.
+name: on_accent
+value: 232
+
+# Failures: error lines in the transcript and the sidebar's last-error block.
+name: error
+value: 161
+
+# Tool activity: the call and result lines the model triggers.
+name: tool
+value: 70
+
+# Focus marker: the scrollbar of whichever pane has the keyboard. Amber like
+# the accent, so focus and the accent read as the same signal.
+name: focus
+value: #ffb000
+
+# Gradient start: the resting colour of the activity bar.
+name: anim_dark
+value: #1a0000
+
+# Gradient end: the hot centre of the activity bar sweep.
+name: anim_light
+value: #ff1a1a
+
+# Logo ramp start, top left of the wordmark. Its own gradient, separate from
+# the activity bar: amber, matching the accent.
+name: logo_from
+value: #ffb000
+
+# Logo ramp end, bottom right of the wordmark: the red the activity bar sweeps
+# in, so the two belong to one palette.
+name: logo_to
+value: #ff1a1a

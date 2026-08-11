@@ -1,3 +1,5 @@
 .idea/
 .DS_Store
 gollum
+crash-bin
+crash/crash

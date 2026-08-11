@@ -18,7 +18,7 @@ func newHuggingFaceProvider(cfg Config) *huggingFaceProvider {
 		baseURL = defaultHFBaseURL
 	}
 	return &huggingFaceProvider{
-		transport: newOpenAITransport(cfg.APIKey),
+		transport: newOpenAITransport(cfg.APIKey, cfg.timeout()),
 		model:     cfg.Model,
 		baseURL:   baseURL,
 	}

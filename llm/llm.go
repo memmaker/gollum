@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 const (
@@ -23,6 +24,16 @@ type Message struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+
+	// Usage is set on the final streamed message when the backend reports
+	// token counts. Never sent back to a provider.
+	Usage *Usage `json:"-"`
+
+	// Err carries a failure that happened after streaming began — a dropped
+	// connection, an error object in the SSE body, unreadable chunks. Before
+	// this existed such failures ended the stream silently and looked like an
+	// empty answer, which is impossible to diagnose from the client side.
+	Err error `json:"-"`
 
 	geminiParts json.RawMessage `json:"-"` // Gemini: raw JSON of response parts, echoed verbatim
 }
@@ -90,6 +101,9 @@ type Usage struct {
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
 	TotalTokens  int `json:"total_tokens,omitempty"`
+	// ReasoningTokens is the thinking part of OutputTokens, not an addition to
+	// it. Backends that report none leave it zero.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 type Provider interface {
@@ -102,6 +116,17 @@ type Config struct {
 	APIKey   string `yaml:"api_key"`
 	Model    string `yaml:"model"`
 	BaseURL  string `yaml:"base_url"`
+	// Timeout bounds the wait for response headers — the phase before any
+	// output exists, which no per-chunk timer can cover. Zero means
+	// DefaultTimeout.
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+func (c Config) timeout() time.Duration {
+	if c.Timeout <= 0 {
+		return DefaultTimeout
+	}
+	return c.Timeout
 }
 
 type Client struct {
@@ -119,7 +144,9 @@ func New(cfg Config) (*Client, error) {
 		p = newOpenAIProvider(cfg)
 	case "gemini":
 		p = newGeminiProvider(cfg)
-	case "lmstudio":
+	case "lmstudio", "omniroute":
+		// Local OpenAI-compatible gateways: same transport, no API key, the
+		// base_url from the config decides where requests go.
 		p = newLMStudioProvider(cfg)
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q", cfg.Provider)

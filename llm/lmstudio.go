@@ -18,7 +18,7 @@ func newLMStudioProvider(cfg Config) *lmstudioProvider {
 		baseURL = defaultLMStudioBaseURL
 	}
 	return &lmstudioProvider{
-		transport: newOpenAITransport(cfg.APIKey),
+		transport: newOpenAITransport(cfg.APIKey, cfg.timeout()),
 		model:     cfg.Model,
 		baseURL:   baseURL,
 	}

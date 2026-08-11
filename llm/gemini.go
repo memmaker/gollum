@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
-	"time"
 )
 
 const defaultGeminiBaseURL = "https://generativelanguage.googleapis.com/v1beta"
@@ -33,7 +32,9 @@ func newGeminiProvider(cfg Config) *geminiProvider {
 		apiKey:  cfg.APIKey,
 		model:   cfg.Model,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 60 * time.Second},
+		// No total timeout: a long answer streams for as long as it needs.
+		// The header wait is what has to be bounded.
+		client: &http.Client{Transport: headerTimeoutTransport(cfg.timeout())},
 	}
 }
 
@@ -132,6 +133,7 @@ type geminiUsage struct {
 	PromptTokenCount     int `json:"promptTokenCount"`
 	CandidatesTokenCount int `json:"candidatesTokenCount"`
 	TotalTokenCount      int `json:"totalTokenCount"`
+	ThoughtsTokenCount   int `json:"thoughtsTokenCount"`
 }
 
 type geminiResp struct {
@@ -311,9 +313,10 @@ func (p *geminiProvider) Chat(ctx context.Context, req Request) (Response, error
 	res := Response{Message: geminiRespToMessage(gr.Candidates[0])}
 	if gr.Usage != nil {
 		res.Usage = Usage{
-			InputTokens:  gr.Usage.PromptTokenCount,
-			OutputTokens: gr.Usage.CandidatesTokenCount,
-			TotalTokens:  gr.Usage.TotalTokenCount,
+			InputTokens:     gr.Usage.PromptTokenCount,
+			OutputTokens:    gr.Usage.CandidatesTokenCount,
+			TotalTokens:     gr.Usage.TotalTokenCount,
+			ReasoningTokens: gr.Usage.ThoughtsTokenCount,
 		}
 	}
 	return res, nil
@@ -357,7 +360,29 @@ func (p *geminiProvider) Stream(ctx context.Context, req Request) (<-chan Messag
 		defer resp.Body.Close()
 		defer close(ch)
 
+		fail := func(err error) {
+			select {
+			case ch <- Message{Role: RoleAssistant, Err: err}:
+			case <-ctx.Done():
+			}
+		}
+
+		// Gemini repeats usageMetadata on every chunk with running totals, so
+		// only the last one counts. Held back and sent once the stream ends,
+		// which is also what the OpenAI transports emit.
+		var last *Usage
+		defer func() {
+			if last == nil {
+				return
+			}
+			select {
+			case ch <- Message{Role: RoleAssistant, Usage: last}:
+			case <-ctx.Done():
+			}
+		}()
+
 		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line == "" {
@@ -371,9 +396,24 @@ func (p *geminiProvider) Stream(ctx context.Context, req Request) (<-chan Messag
 				return
 			}
 
+			var ge geminiErr
+			if json.Unmarshal([]byte(data), &ge) == nil && ge.Error.Message != "" {
+				fail(fmt.Errorf("gemini: backend error: %s", ge.Error.Message))
+				return
+			}
+
 			var gr geminiResp
 			if err := json.Unmarshal([]byte(data), &gr); err != nil {
-				continue
+				fail(fmt.Errorf("gemini: unreadable chunk: %w: %s", err, truncateForError(data)))
+				return
+			}
+			if gr.Usage != nil {
+				last = &Usage{
+					InputTokens:     gr.Usage.PromptTokenCount,
+					OutputTokens:    gr.Usage.CandidatesTokenCount,
+					TotalTokens:     gr.Usage.TotalTokenCount,
+					ReasoningTokens: gr.Usage.ThoughtsTokenCount,
+				}
 			}
 			if len(gr.Candidates) == 0 {
 				continue
@@ -387,6 +427,9 @@ func (p *geminiProvider) Stream(ctx context.Context, req Request) (<-chan Messag
 					return
 				}
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			fail(fmt.Errorf("gemini: stream ended early: %w", err))
 		}
 	}()
 	return ch, nil

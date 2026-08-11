@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 type openaiTransport struct {
@@ -23,15 +24,22 @@ type openaiTransport struct {
 }
 
 type openaiReq struct {
-	Model               string    `json:"model"`
-	Messages            []Message `json:"messages"`
-	Temperature         float64   `json:"temperature,omitempty"`
-	MaxTokens           int       `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int       `json:"max_completion_tokens,omitempty"`
-	Stream              bool      `json:"stream"`
-	Tools               []Tool    `json:"tools,omitempty"`
-	ReasoningEffort     string    `json:"reasoning_effort,omitempty"`
-	ServiceTier         string    `json:"service_tier,omitempty"`
+	Model               string           `json:"model"`
+	Messages            []Message        `json:"messages"`
+	Temperature         float64          `json:"temperature,omitempty"`
+	MaxTokens           int              `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
+	Stream              bool             `json:"stream"`
+	Tools               []Tool           `json:"tools,omitempty"`
+	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
+	ServiceTier         string           `json:"service_tier,omitempty"`
+	StreamOptions       *oaStreamOptions `json:"stream_options,omitempty"`
+}
+
+// oaStreamOptions asks for a final usage chunk. Without it a streamed answer
+// reports no token counts at all.
+type oaStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // serviceTier returns the value to put in the outgoing body, dropping it for
@@ -121,12 +129,28 @@ type oaUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	Details          *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details,omitempty"`
+}
+
+func (u *oaUsage) toUsage() Usage {
+	res := Usage{
+		InputTokens:  u.PromptTokens,
+		OutputTokens: u.CompletionTokens,
+		TotalTokens:  u.TotalTokens,
+	}
+	if u.Details != nil {
+		res.ReasoningTokens = u.Details.ReasoningTokens
+	}
+	return res
 }
 
 type oaChunk struct {
 	ID      string          `json:"id"`
 	Object  string          `json:"object"`
 	Choices []oaChunkChoice `json:"choices"`
+	Usage   *oaUsage        `json:"usage,omitempty"`
 }
 
 type oaChunkChoice struct {
@@ -159,10 +183,20 @@ type oaFunctionCall struct {
 	Arguments string `json:"arguments,omitempty"`
 }
 
-func newOpenAITransport(apiKey string) *openaiTransport {
+// headerTimeoutTransport bounds the wait for response headers without bounding
+// the response body: a streamed answer may legitimately take minutes, but a
+// backend that accepts the connection and never replies must not hang the
+// client. Client.Timeout cannot express that — it covers the body read too.
+func headerTimeoutTransport(d time.Duration) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = d
+	return t
+}
+
+func newOpenAITransport(apiKey string, timeout time.Duration) *openaiTransport {
 	return &openaiTransport{
 		apiKey: apiKey,
-		client: &http.Client{},
+		client: &http.Client{Transport: headerTimeoutTransport(timeout)},
 	}
 }
 
@@ -211,11 +245,7 @@ func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Re
 
 	res := Response{Message: oa.Choices[0].Message}
 	if oa.Usage != nil {
-		res.Usage = Usage{
-			InputTokens:  oa.Usage.PromptTokens,
-			OutputTokens: oa.Usage.CompletionTokens,
-			TotalTokens:  oa.Usage.TotalTokens,
-		}
+		res.Usage = oa.Usage.toUsage()
 	}
 	return res, nil
 }
@@ -232,6 +262,7 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 		Tools:               req.Tools,
 		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort, req.Model),
 		ServiceTier:         t.serviceTier(req.ServiceTier),
+		StreamOptions:       &oaStreamOptions{IncludeUsage: true},
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -281,7 +312,16 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 		defer resp.Body.Close()
 		defer close(ch)
 
+		fail := func(err error) {
+			select {
+			case ch <- Message{Role: RoleAssistant, Err: err}:
+			case <-ctx.Done():
+			}
+		}
+
 		scanner := bufio.NewScanner(resp.Body)
+		// SSE chunks can exceed bufio's default 64KB line limit.
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line == "" {
@@ -295,9 +335,33 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 				return
 			}
 
+			// Routers report mid-stream failures as an error object in the
+			// SSE body rather than an HTTP status, so look for one first.
+			var errPayload struct {
+				Error struct {
+					Message string `json:"message"`
+					Type    string `json:"type"`
+					Code    any    `json:"code"`
+				} `json:"error"`
+			}
+			if json.Unmarshal([]byte(data), &errPayload) == nil && errPayload.Error.Message != "" {
+				fail(fmt.Errorf("llm: backend error: %s", describeAPIError(errPayload.Error.Message, errPayload.Error.Type, errPayload.Error.Code)))
+				return
+			}
+
 			var chunk oaChunk
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				continue
+				fail(fmt.Errorf("llm: unreadable chunk: %w: %s", err, truncateForError(data)))
+				return
+			}
+			// The usage chunk arrives last and carries no choices.
+			if chunk.Usage != nil {
+				u := chunk.Usage.toUsage()
+				select {
+				case ch <- Message{Role: RoleAssistant, Usage: &u}:
+				case <-ctx.Done():
+					return
+				}
 			}
 			for _, c := range chunk.Choices {
 				p := getPart(c.Index)
@@ -401,6 +465,36 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 				}
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			// The stream stopped early: a dropped connection, a proxy cutting
+			// the response. Silence here reads as a complete empty answer.
+			fail(fmt.Errorf("llm: stream ended early: %w", err))
+		}
 	}()
 	return ch, nil
+}
+
+// describeAPIError keeps whatever the backend chose to tell us.
+func describeAPIError(message, kind string, code any) string {
+	out := message
+	if kind != "" {
+		out += " (" + kind
+		if code != nil && code != "" {
+			out += fmt.Sprintf(", code %v", code)
+		}
+		out += ")"
+	} else if code != nil && code != "" {
+		out += fmt.Sprintf(" (code %v)", code)
+	}
+	return out
+}
+
+// truncateForError keeps an unparsable payload short enough to read.
+func truncateForError(s string) string {
+	const limit = 200
+	s = strings.TrimSpace(s)
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "…"
 }

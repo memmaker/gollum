@@ -17,6 +17,7 @@ const defaultCopilotBaseURL = "https://api.githubcopilot.com"
 type copilotProvider struct {
 	apiKey    string
 	model     string
+	timeout   time.Duration
 	client    *http.Client
 	mu        sync.Mutex
 	cached    string
@@ -30,9 +31,10 @@ type copilotTokenResp struct {
 
 func newCopilotProvider(cfg Config) *copilotProvider {
 	return &copilotProvider{
-		apiKey: cfg.APIKey,
-		model:  cfg.Model,
-		client: &http.Client{Timeout: 30 * time.Second},
+		apiKey:  cfg.APIKey,
+		model:   cfg.Model,
+		timeout: cfg.timeout(),
+		client:  &http.Client{Transport: headerTimeoutTransport(cfg.timeout())},
 	}
 }
 
@@ -88,7 +90,7 @@ func (p *copilotProvider) Chat(ctx context.Context, req Request) (Response, erro
 	if req.Model == "" {
 		req.Model = p.model
 	}
-	trans := newOpenAITransport(token)
+	trans := newOpenAITransport(token, p.timeout)
 	return trans.chat(ctx, defaultCopilotBaseURL+"/chat/completions", req)
 }
 
@@ -100,6 +102,6 @@ func (p *copilotProvider) Stream(ctx context.Context, req Request) (<-chan Messa
 	if req.Model == "" {
 		req.Model = p.model
 	}
-	trans := newOpenAITransport(token)
+	trans := newOpenAITransport(token, p.timeout)
 	return trans.stream(ctx, defaultCopilotBaseURL+"/chat/completions", req)
 }

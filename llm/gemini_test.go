@@ -1,7 +1,11 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -100,5 +104,36 @@ func TestBuildGeminiReqSystemMessagesStayOutOfContents(t *testing.T) {
 	}
 	if g.Contents[0].Role != "user" {
 		t.Errorf("Contents[0].Role = %q, want %q", g.Contents[0].Role, "user")
+	}
+}
+
+// Gemini repeats usageMetadata on every chunk with running totals: the stream
+// must report the last one once, not add them up.
+func TestGeminiStreamUsageOnce(t *testing.T) {
+	body := "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":1,\"totalTokenCount\":11}}\n\n" +
+		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}]}}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":4,\"totalTokenCount\":14,\"thoughtsTokenCount\":3}}\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	p := &geminiProvider{baseURL: srv.URL, apiKey: "k", client: srv.Client()}
+	ch, err := p.Stream(context.Background(), Request{Model: "gemini-x", Messages: []Message{{Role: RoleUser, Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	var got []Usage
+	for msg := range ch {
+		if msg.Usage != nil {
+			got = append(got, *msg.Usage)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("usage messages = %d, want 1: %+v", len(got), got)
+	}
+	if want := (Usage{InputTokens: 10, OutputTokens: 4, TotalTokens: 14, ReasoningTokens: 3}); got[0] != want {
+		t.Fatalf("usage = %+v, want %+v", got[0], want)
 	}
 }
