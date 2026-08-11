@@ -56,9 +56,13 @@ var keys = keymap{
 	// enter sends in the one-line prompt; in the multiline box it is left to
 	// fall through to the textarea's own default of inserting a newline.
 	send: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
-	// alt+enter is the multiline box's send key — the opposite of enter there,
-	// so a box that looks like an editor keeps enter meaning "newline".
-	altEnter: key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "send")),
+	// ctrl+j (line feed, its own control byte — distinct from enter's CR) is
+	// the multiline box's send key, the opposite of enter there so a box that
+	// looks like an editor keeps enter meaning "newline". alt+enter works too,
+	// where the terminal is configured to send it — macOS terminals need
+	// "Option as Meta" turned on for that, off by default, so ctrl+j is the
+	// one guaranteed to work without any setup.
+	altEnter: key.NewBinding(key.WithKeys("ctrl+j", "alt+enter"), key.WithHelp("ctrl+j", "send")),
 	// Never matched against a key — shown in the multiline help line only, to
 	// say what plain enter does there since nothing else states it.
 	newlineHint: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "newline")),
@@ -346,6 +350,14 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmd tea.Cmd
 				m.oneLine, cmd = m.oneLine.Update(msg)
 				return m, cmd
+			}
+			if msg.Type == tea.KeyPgUp {
+				m.pageMultiline(true)
+				return m, nil
+			}
+			if msg.Type == tea.KeyPgDown {
+				m.pageMultiline(false)
+				return m, nil
 			}
 			var cmd tea.Cmd
 			m.multiLine, cmd = m.multiLine.Update(msg)

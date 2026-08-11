@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -568,8 +569,11 @@ func TestMultilineToggleGrowsAndShrinks(t *testing.T) {
 		t.Fatalf("box stayed at %d with content that overruns it", got)
 	}
 
-	// alt+enter sends in multiline mode and the box shrinks back to its floor.
-	m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	// ctrl+j sends in multiline mode and the box shrinks back to its floor —
+	// this is the primary send key: alt+enter needs "Option as Meta" turned on
+	// in most macOS terminals, off by default, so ctrl+j is the one guaranteed
+	// to reach the app with no setup.
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
 	if got := m.value(); got != "" {
 		t.Fatalf("box still holds %q after sending", got)
 	}
@@ -601,5 +605,31 @@ func TestMultilineToggleDoesNotLoseNewlines(t *testing.T) {
 	m.toggleMultiline() // back up, untouched since folding
 	if got := m.multiLine.Value(); got != "line one\nline two\nline three" {
 		t.Fatalf("multiline value after round trip = %q", got)
+	}
+}
+
+// The default textarea keymap has no page keys at all — pgup/pgdn have to be
+// wired up by hand, one row-step at a time, so the box's own viewport follows
+// exactly as a single arrow key would.
+func TestMultilinePageKeys(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(60, 20)
+	m.focus = paneInput
+	m.toggleMultiline()
+
+	lines := make([]string, 20)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line%d", i)
+	}
+	m.setValue(strings.Join(lines, "\n")) // cursor ends on the last line, 19
+	height := m.multiLine.Height()
+
+	m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if want := 19 - height; m.multiLine.Line() != want {
+		t.Fatalf("pgup landed on line %d, want %d (a page up from the bottom)", m.multiLine.Line(), want)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if m.multiLine.Line() != 19 {
+		t.Fatalf("pgdown landed on line %d, want back to the bottom (19)", m.multiLine.Line())
 	}
 }

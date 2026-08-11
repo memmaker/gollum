@@ -6,6 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -149,6 +150,19 @@ func (m *tui) inputView() string {
 func (m *tui) setInputWidth(w int) {
 	m.oneLine.Width = max(w-ansi.StringWidth(m.oneLine.Prompt), 1)
 	m.multiLine.SetWidth(max(w-multilineBorderCols, 1))
+}
+
+// pageMultiline moves the multiline box's cursor by a page — its own content
+// height — one visual row at a time through the textarea's own up/down
+// handling, so the box scrolls to follow exactly as a single arrow key would.
+func (m *tui) pageMultiline(up bool) {
+	step := tea.KeyMsg{Type: tea.KeyDown}
+	if up {
+		step = tea.KeyMsg{Type: tea.KeyUp}
+	}
+	for i := 0; i < m.multiLine.Height(); i++ {
+		m.multiLine, _ = m.multiLine.Update(step)
+	}
 }
 
 // toggleMultiline flips the input between its one-row prompt and the growing
