@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -41,6 +43,18 @@ func TestRenderMarkdown(t *testing.T) {
 func TestVisibleLenIgnoresEscapes(t *testing.T) {
 	if n := visibleLen(ansiBold + "abc" + ansiReset); n != 3 {
 		t.Fatalf("visibleLen = %d, want 3", n)
+	}
+}
+
+// Wide glyphs are two cells. Counting them as one used to wrap lines past the
+// pane, where they overran the scrollbar column.
+func TestWrapIndentCountsWideGlyphs(t *testing.T) {
+	const width = 40
+	src := strings.TrimSpace(strings.Repeat("🚀 漢字 ", 12))
+	for _, line := range strings.Split(RenderMarkdown(src, width), "\n") {
+		if w := ansi.StringWidth(line); w > width {
+			t.Fatalf("line %d cells wide, pane is %d: %q", w, width, line)
+		}
 	}
 }
 

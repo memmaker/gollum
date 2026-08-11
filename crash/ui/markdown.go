@@ -7,6 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -211,12 +212,8 @@ func columnAlign(n *gast.Table, i int) gast.Alignment {
 	return gast.AlignNone
 }
 
-// padCell widens one cell to its column, counting printable runes so the ANSI
+// padCell widens one cell to its column, counting display cells so the ANSI
 // styling inside it does not push the column edges apart.
-//
-// ponytail: runes, not display cells, matching the rest of the renderer. A
-// table of CJK or emoji will sit a column short; swap visibleLen for
-// ansi.StringWidth throughout — wrapIndent included — if that day comes.
 func padCell(s string, width int, align gast.Alignment) string {
 	gap := width - visibleLen(s)
 	if gap <= 0 {
@@ -315,23 +312,11 @@ func wrapIndent(s string, width int, indent string) string {
 	return strings.Join(out, "\n")
 }
 
-// visibleLen counts printable runes, skipping ANSI escape sequences.
-func visibleLen(s string) int {
-	n, inEscape := 0, false
-	for _, r := range s {
-		switch {
-		case inEscape:
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				inEscape = false
-			}
-		case r == 0x1b:
-			inEscape = true
-		default:
-			n++
-		}
-	}
-	return n
-}
+// visibleLen counts the terminal cells a string occupies, skipping ANSI escape
+// sequences. Cells, not runes: an emoji or a CJK glyph is two columns wide, and
+// counting it as one wraps lines past the pane and shoves the scrollbar over.
+// Same measure the viewport and lipgloss use, so the layout agrees end to end.
+func visibleLen(s string) int { return ansi.StringWidth(s) }
 
 // PlainText reduces markdown to the prose inside it, using the same parse the
 // renderer uses rather than a second guess at the syntax: markers gone, fenced
