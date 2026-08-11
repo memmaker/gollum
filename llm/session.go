@@ -65,6 +65,10 @@ type Session struct {
 	// model actually saw, which the conversation history alone does not say.
 	lastRequest []Message
 
+	// lastTools is the tool schema offered alongside lastRequest — what the
+	// model was told it could call, not just what it was told.
+	lastTools []Tool
+
 	// usage accumulates every token count the backends reported for this
 	// session. Providers that report none leave it at zero.
 	usage Usage
@@ -87,6 +91,14 @@ func (s *Session) LastRequest() []Message {
 	return s.lastRequest
 }
 
+// LastRequestTools returns the tool schema offered with the most recent
+// request, in the same snapshot terms as LastRequest.
+func (s *Session) LastRequestTools() []Tool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastTools
+}
+
 // Err returns the error that ended the last StreamWithTools call, or nil. Safe
 // to call while a stream is still running; it reports what has failed so far.
 func (s *Session) Err() error {
@@ -101,10 +113,12 @@ func (s *Session) setErr(err error) {
 	s.mu.Unlock()
 }
 
-func (s *Session) setLastRequest(msgs []Message) {
+func (s *Session) setLastRequest(msgs []Message, tools []Tool) {
 	snapshot := append([]Message{}, msgs...)
+	toolSnapshot := append([]Tool{}, tools...)
 	s.mu.Lock()
 	s.lastRequest = snapshot
+	s.lastTools = toolSnapshot
 	s.mu.Unlock()
 }
 
@@ -292,13 +306,14 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 		}
 
 		for {
-			s.setLastRequest(msgs)
+			offered := s.offeredTools()
+			s.setLastRequest(msgs, offered)
 			req := Request{
 				Messages:        msgs,
 				Model:           s.Model,
 				Temperature:     s.Temp,
 				MaxTokens:       s.MaxTokens,
-				Tools:           s.offeredTools(),
+				Tools:           offered,
 				ReasoningEffort: s.ReasoningEffort,
 				ServiceTier:     s.ServiceTier,
 			}
@@ -485,7 +500,7 @@ func (s *Session) SendWithTools(ctx context.Context, prompt string, userTools []
 	msgs := append(base, userMsg)
 
 	for {
-		s.setLastRequest(msgs)
+		s.setLastRequest(msgs, allTools)
 		req := Request{
 			Messages:        msgs,
 			Model:           s.Model,

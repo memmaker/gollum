@@ -266,7 +266,7 @@ func (m *tui) openMenu() {
 		}, false, false},
 		{"Show last context", func() {
 			m.page = newPager("context sent with the last request",
-				renderContext(m.sess.LastRequest()), m.width, m.height)
+				renderContext(m.sess.LastRequest(), m.sess.LastRequestTools()), m.width, m.height)
 		}, false, false},
 		{"Request costs", func() {
 			m.page = newPager("token cost per request", m.stats.String(), m.width, m.height)

@@ -336,13 +336,15 @@ func TestRenderContext(t *testing.T) {
 			{Function: llm.ToolCallFunction{Name: "user_choice", Arguments: `{"options":["cat"]}`}},
 		}},
 		{Role: llm.RoleTool, Name: "user_choice", Content: "cat"},
+	}, []llm.Tool{
+		{Function: llm.ToolFunction{Name: "user_choice", Description: "ask the user", Parameters: map[string]any{"type": "object"}}},
 	})
-	for _, want := range []string{"pick one", "user_choice", `{"options":["cat"]}`, "cat"} {
+	for _, want := range []string{"pick one", "user_choice", `{"options":["cat"]}`, "cat", "tools offered", "ask the user", `"type":"object"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("context view is missing %q:\n%s", want, out)
 		}
 	}
-	if !strings.Contains(renderContext(nil), "no request") {
+	if !strings.Contains(renderContext(nil, nil), "no request") {
 		t.Fatal("an empty context should say so")
 	}
 }

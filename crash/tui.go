@@ -169,6 +169,11 @@ type tui struct {
 	mcpConfigs []MCPConfig           // every `mcp:` record, on or off
 	mcpClients map[string]*mcpClient // running servers, keyed by config name
 	toolConfigs []ToolConfig          // every built-in tool, on or off
+
+	// gitStatus is the branch + diff tally shown on the statusbar's right
+	// side, refreshed each turn rather than on every render — a subprocess
+	// per animation frame would be wasteful. Empty outside a git repo.
+	gitStatus string
 }
 
 // ttsFailMsg reports that the engine died after it had started. It arrives on
@@ -217,6 +222,7 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 		mcpConfigs: mcpConfigs,
 		mcpClients: mcpClients,
 		toolConfigs: toolConfigs,
+		gitStatus:  gitStatusLine(),
 	}
 	m.histAt = len(m.history)
 	if len(mcpNotes) > 0 {
@@ -350,7 +356,18 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cycleFocus()
 			return m, nil
 		}
+		if key.Matches(msg, keys.cancel) && m.focus != paneInput {
+			m.focus = paneInput
+			m.focusInput()
+			return m, nil
+		}
 		if m.focus == paneInput {
+			if msg.Type == tea.KeyShiftUp {
+				return m, m.scroll(tea.KeyMsg{Type: tea.KeyUp})
+			}
+			if msg.Type == tea.KeyShiftDown {
+				return m, m.scroll(tea.KeyMsg{Type: tea.KeyDown})
+			}
 			if key.Matches(msg, keys.multiline) {
 				m.toggleMultiline()
 				return m, nil
@@ -808,6 +825,7 @@ func (m *tui) refreshSidebar() {
 	if !m.ready {
 		return
 	}
+	m.gitStatus = gitStatusLine()
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n%s\n\n", label.Render("model"), m.current)
 	if u := m.stats.total(); u.TotalTokens > 0 {
@@ -912,7 +930,7 @@ func scrollbar(vp viewport.Model, focused bool) string {
 func (m *tui) helpLine() string {
 	var b []key.Binding
 	if m.choice != nil {
-		return m.help.ShortHelpView([]key.Binding{keys.pick, keys.up, keys.down, keys.cancel, keys.quit})
+		return m.padStatus(m.help.ShortHelpView([]key.Binding{keys.pick, keys.up, keys.down, keys.cancel, keys.quit}))
 	}
 	switch m.focus {
 	case paneInput:
@@ -924,5 +942,18 @@ func (m *tui) helpLine() string {
 	default:
 		b = []key.Binding{keys.up, keys.down, keys.top, keys.bottom, keys.next, keys.menu, keys.quit}
 	}
-	return m.help.ShortHelpView(b)
+	return m.padStatus(m.help.ShortHelpView(b))
+}
+
+// padStatus appends the git statusbar to the right of the help line, padded
+// out to the terminal width. Left alone when there is no room or no repo.
+func (m *tui) padStatus(left string) string {
+	if m.gitStatus == "" {
+		return left
+	}
+	gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(m.gitStatus)
+	if gap < 1 {
+		return left
+	}
+	return left + strings.Repeat(" ", gap) + m.gitStatus
 }

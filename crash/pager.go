@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -104,8 +105,10 @@ func (p *pager) view(h help.Model) string {
 }
 
 // renderContext lays out the messages of a request the way they were sent:
-// role, then body, with tool calls and their results spelled out.
-func renderContext(msgs []llm.Message) string {
+// role, then body, with tool calls and their results spelled out, followed by
+// the tool schema offered alongside them — what the model was told it could
+// call, not just what it was told.
+func renderContext(msgs []llm.Message, tools []llm.Tool) string {
 	if len(msgs) == 0 {
 		return dim.Render("no request has been sent yet")
 	}
@@ -126,6 +129,20 @@ func renderContext(msgs []llm.Message) string {
 			fmt.Fprintf(&b, "%s %s\n",
 				toolStyle.Render("⚒ "+tc.Function.Name),
 				dim.Render(strings.TrimSpace(tc.Function.Arguments)))
+		}
+	}
+	if len(tools) > 0 {
+		fmt.Fprintf(&b, "\n%s\n", label.Render("tools offered"))
+		for _, t := range tools {
+			desc := strings.TrimSpace(t.Function.Description)
+			params := ""
+			if raw, err := json.Marshal(t.Function.Parameters); err == nil {
+				params = string(raw)
+			}
+			fmt.Fprintf(&b, "%s %s\n", toolStyle.Render("⚒ "+t.Function.Name), dim.Render(desc))
+			if params != "" && params != "null" {
+				fmt.Fprintf(&b, "%s\n", dim.Render(params))
+			}
 		}
 	}
 	return b.String()
