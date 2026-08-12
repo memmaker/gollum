@@ -201,8 +201,10 @@ type tui struct {
 	toolConfigs []ToolConfig          // every built-in tool, on or off
 
 	// gitStatus is the branch + diff tally shown on the statusbar's right
-	// side, refreshed each turn rather than on every render — a subprocess
-	// per animation frame would be wasteful. Empty outside a git repo.
+	// side. Two `git` subprocesses to produce, so it is refreshed at the two
+	// ends of a turn (see submit and finishTurn) rather than from
+	// refreshSidebar, which runs on every scroll, drag and streamed chunk.
+	// Empty outside a git repo.
 	gitStatus string
 }
 
@@ -562,6 +564,7 @@ func (m *tui) submit() tea.Cmd {
 	m.note = ""
 	m.lastPrompt = text
 	m.turnStart = m.transcript.Len()
+	m.gitStatus = gitStatusLine()
 	// Wrapped like every other line that reaches the pane. Written raw, a long
 	// prompt ran past the pane edge and the viewport hard-truncated it, which
 	// is also where an emoji-heavy prompt pushed the scrollbar out of line.
@@ -767,6 +770,8 @@ func (m *tui) finishTurn() {
 	}
 	m.answer.Reset()
 	m.stream = nil
+	// A turn that ran the bash tool may have changed the tree under us.
+	m.gitStatus = gitStatusLine()
 	m.setOutput(m.transcript.String())
 	// The markdown pass reflows the whole answer, so the view is wherever the
 	// streaming left it. Put the prompt that started this turn at the top:
@@ -932,7 +937,6 @@ func (m *tui) refreshSidebar() {
 	if !m.ready {
 		return
 	}
-	m.gitStatus = gitStatusLine()
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n%s\n\n", label.Render("model"), m.current)
 	if u := m.stats.total(); u.TotalTokens > 0 {
