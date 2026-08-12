@@ -340,25 +340,34 @@ func (m *tui) openMenu() {
 	})
 }
 
-// openMCPMenu lists every configured MCP with its current on/off state.
-// Unlike the model or TTS-language pickers, it stays open across a toggle
-// instead of resolving to one answer — the same reasoning behind openMenu's
-// "stay" entries — and returns to the main menu itself once cancelled.
-func (m *tui) openMCPMenu() {
-	labels := make([]string, len(m.mcpConfigs))
-	for i, c := range m.mcpConfigs {
-		labels[i] = c.Name + ": " + onOff(c.Enabled)
-	}
-	m.openChoice("MCPs", labels, func(i int) {
+// stayMenu is a submenu of toggles: it stays open across a flip instead of
+// resolving to one answer — the same reasoning behind openMenu's "stay"
+// entries — and returns to the main menu itself once cancelled. build is
+// called on every reopen so the labels carry the state that was just changed,
+// and hands back the action for whichever row was picked.
+func (m *tui) stayMenu(title string, build func() ([]string, func(int))) {
+	labels, act := build()
+	m.openChoice(title, labels, func(i int) {
 		if i < 0 {
 			m.openMenu()
 			m.refreshSidebar()
 			return
 		}
-		m.toggleMCP(i)
-		m.openMCPMenu()
+		act(i)
+		m.stayMenu(title, build)
 		m.choice.Select(i)
 		m.refreshSidebar()
+	})
+}
+
+// openMCPMenu lists every configured MCP with its current on/off state.
+func (m *tui) openMCPMenu() {
+	m.stayMenu("MCPs", func() ([]string, func(int)) {
+		labels := make([]string, len(m.mcpConfigs))
+		for i, c := range m.mcpConfigs {
+			labels[i] = c.Name + ": " + onOff(c.Enabled)
+		}
+		return labels, m.toggleMCP
 	})
 }
 
@@ -419,24 +428,18 @@ func (m *tui) disableMCP(name, note string) {
 }
 
 // openToolsMenu lists every built-in tool plus every tool offered by a
-// running MCP server, with its current on/off state. Like openMCPMenu, it
-// stays open across toggles and returns to the main menu when cancelled.
+// running MCP server, with its current on/off state.
 func (m *tui) openToolsMenu() {
-	names := m.toolMenuNames()
-	labels := make([]string, len(names))
-	for i, n := range names {
-		labels[i] = n + ": " + onOff(toolEnabled(n, m.toolConfigs))
-	}
-	m.openChoice("Tools", labels, func(i int) {
-		if i < 0 {
-			m.openMenu()
-			m.refreshSidebar()
-			return
+	m.stayMenu("Tools", func() ([]string, func(int)) {
+		// The names are captured rather than re-derived on the toggle:
+		// toolMenuNames walks a map, so a second call can order them
+		// differently and the picked row would toggle another tool.
+		names := m.toolMenuNames()
+		labels := make([]string, len(names))
+		for i, n := range names {
+			labels[i] = n + ": " + onOff(toolEnabled(n, m.toolConfigs))
 		}
-		m.toggleTool(names[i])
-		m.openToolsMenu()
-		m.choice.Select(i)
-		m.refreshSidebar()
+		return labels, func(i int) { m.toggleTool(names[i]) }
 	})
 }
 
@@ -488,30 +491,4 @@ func (m *tui) setToolConfig(name string, enabled bool) {
 		}
 	}
 	m.toolConfigs = append(m.toolConfigs, ToolConfig{Name: name, Enabled: enabled})
-}
-
-// toolListing renders "Tools": every tool currently offered to the model,
-// grouped by where it came from.
-func (m *tui) toolListing() string {
-	var b strings.Builder
-	b.WriteString(label.Render("built-in") + "\n")
-	for _, name := range []string{"user_choice", "bash"} {
-		if toolEnabled(name, m.toolConfigs) {
-			b.WriteString("  " + name + "\n")
-		}
-	}
-	for _, cfg := range m.mcpConfigs {
-		c, ok := m.mcpClients[cfg.Name]
-		if !cfg.Enabled || !ok {
-			continue
-		}
-		b.WriteString("\n" + label.Render(cfg.Name) + "\n")
-		for _, t := range c.tools {
-			if !toolEnabled(t.Name, m.toolConfigs) {
-				continue
-			}
-			b.WriteString("  " + t.Name + "\n")
-		}
-	}
-	return strings.TrimRight(b.String(), "\n")
 }

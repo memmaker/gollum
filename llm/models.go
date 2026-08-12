@@ -62,15 +62,7 @@ func listOpenAIModels(ctx context.Context, baseURL, apiKey string) ([]string, er
 	return names, nil
 }
 
-func (p *openAIProvider) ListModels(ctx context.Context) ([]string, error) {
-	return listOpenAIModels(ctx, p.baseURL, p.transport.apiKey)
-}
-
-func (p *lmstudioProvider) ListModels(ctx context.Context) ([]string, error) {
-	return listOpenAIModels(ctx, p.baseURL, p.transport.apiKey)
-}
-
-func (p *huggingFaceProvider) ListModels(ctx context.Context) ([]string, error) {
+func (p *openAICompatProvider) ListModels(ctx context.Context) ([]string, error) {
 	return listOpenAIModels(ctx, p.baseURL, p.transport.apiKey)
 }
 

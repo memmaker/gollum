@@ -160,10 +160,9 @@ type oaChunkChoice struct {
 }
 
 type oaDelta struct {
-	Role         string          `json:"role,omitempty"`
-	Content      string          `json:"content,omitempty"`
-	ToolCalls    []oaToolCall    `json:"tool_calls,omitempty"`
-	FunctionCall *oaFunctionCall `json:"function_call,omitempty"`
+	Role      string       `json:"role,omitempty"`
+	Content   string       `json:"content,omitempty"`
+	ToolCalls []oaToolCall `json:"tool_calls,omitempty"`
 }
 
 type oaToolCall struct {
@@ -174,11 +173,6 @@ type oaToolCall struct {
 }
 
 type oaToolCallFunction struct {
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-}
-
-type oaFunctionCall struct {
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
 }
@@ -200,7 +194,10 @@ func newOpenAITransport(apiKey string, timeout time.Duration) *openaiTransport {
 	}
 }
 
-func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Response, error) {
+// body builds the outgoing request for a call, routing every field to the
+// parameter the target model accepts. stream also asks for the final usage
+// chunk, which is the only place token counts arrive on a streamed answer.
+func (t *openaiTransport) body(req Request, stream bool) openaiReq {
 	legacyMax, completionMax := maxTokenFields(req.Model, req.MaxTokens)
 	body := openaiReq{
 		Model:               req.Model,
@@ -208,32 +205,51 @@ func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Re
 		Temperature:         effectiveTemperature(req.Model, req.Temperature),
 		MaxTokens:           legacyMax,
 		MaxCompletionTokens: completionMax,
+		Stream:              stream,
 		Tools:               req.Tools,
 		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort, req.Model),
 		ServiceTier:         t.serviceTier(req.ServiceTier),
 	}
+	if stream {
+		body.StreamOptions = &oaStreamOptions{IncludeUsage: true}
+	}
+	return body
+}
+
+// post sends one request body and hands back a response whose status is known
+// good. The body is left open — a streamed answer is read from it — so every
+// caller closes it.
+func (t *openaiTransport) post(ctx context.Context, url string, body openaiReq) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return Response{}, fmt.Errorf("llm: marshal: %w", err)
+		return nil, fmt.Errorf("llm: marshal: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return Response{}, fmt.Errorf("llm: new request: %w", err)
+		return nil, fmt.Errorf("llm: new request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+t.apiKey)
 
 	resp, err := t.client.Do(httpReq)
 	if err != nil {
-		return Response{}, fmt.Errorf("llm: http: %w", err)
+		return nil, fmt.Errorf("llm: http: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return Response{}, fmt.Errorf("llm: API %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		resp.Body.Close()
+		return nil, fmt.Errorf("llm: API %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
+	return resp, nil
+}
+
+func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Response, error) {
+	resp, err := t.post(ctx, url, t.body(req, false))
+	if err != nil {
+		return Response{}, err
+	}
+	defer resp.Body.Close()
 
 	var oa openaiResp
 	if err := json.NewDecoder(resp.Body).Decode(&oa); err != nil {
@@ -251,49 +267,16 @@ func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Re
 }
 
 func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (<-chan Message, error) {
-	legacyMax, completionMax := maxTokenFields(req.Model, req.MaxTokens)
-	body := openaiReq{
-		Model:               req.Model,
-		Messages:            req.Messages,
-		Temperature:         effectiveTemperature(req.Model, req.Temperature),
-		MaxTokens:           legacyMax,
-		MaxCompletionTokens: completionMax,
-		Stream:              true,
-		Tools:               req.Tools,
-		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort, req.Model),
-		ServiceTier:         t.serviceTier(req.ServiceTier),
-		StreamOptions:       &oaStreamOptions{IncludeUsage: true},
-	}
-	payload, err := json.Marshal(body)
+	resp, err := t.post(ctx, url, t.body(req, true))
 	if err != nil {
-		return nil, fmt.Errorf("llm: marshal: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("llm: new request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+t.apiKey)
-
-	resp, err := t.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("llm: http: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return nil, fmt.Errorf("llm: API %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return nil, err
 	}
 
 	ch := make(chan Message)
-	// state per choice index: accumulate role, content, function call name/args, tool calls
+	// state per choice index: accumulate role, content, tool calls
 	type partial struct {
 		role      string
 		content   strings.Builder
-		fnName    string
-		fnArgs    strings.Builder
 		toolCalls map[int]*oaToolCall
 	}
 	parts := make(map[int]*partial)
@@ -403,18 +386,8 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 						}
 					}
 				}
-				// legacy function_call format (deprecated but still supported)
-				if c.Delta.FunctionCall != nil {
-					if c.Delta.FunctionCall.Name != "" {
-						p.fnName = c.Delta.FunctionCall.Name
-					}
-					if c.Delta.FunctionCall.Arguments != "" {
-						p.fnArgs.WriteString(c.Delta.FunctionCall.Arguments)
-					}
-				}
-				// finish reason: if tool_call/function_call completed, emit a tool-call message
+				// finish reason: if the tool calls completed, emit them as one message
 				if c.FinishReason != "" {
-					// Handle new tool_calls format
 					if c.FinishReason == "tool_calls" && p.toolCalls != nil {
 						// Deltas are accumulated by index, and ranging a map
 						// would hand the caller the calls in random order.
@@ -444,22 +417,6 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 							case <-ctx.Done():
 								return
 							}
-						}
-						delete(parts, c.Index)
-					} else if (c.FinishReason == "function_call" || p.fnName != "") && c.FinishReason != "tool_calls" {
-						// Handle legacy function_call format
-						tc := ToolCall{
-							ID:   fmt.Sprintf("oa-fc-%d", c.Index),
-							Type: "function",
-							Function: ToolCallFunction{
-								Name:      p.fnName,
-								Arguments: p.fnArgs.String(),
-							},
-						}
-						select {
-						case ch <- Message{Role: RoleAssistant, ToolCalls: []ToolCall{tc}}:
-						case <-ctx.Done():
-							return
 						}
 						delete(parts, c.Index)
 					}

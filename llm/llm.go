@@ -139,15 +139,16 @@ func New(cfg Config) (*Client, error) {
 	case "copilot":
 		p = newCopilotProvider(cfg)
 	case "huggingface":
-		p = newHuggingFaceProvider(cfg)
+		p = newOpenAICompatProvider(cfg, defaultHFBaseURL, false)
 	case "openai":
-		p = newOpenAIProvider(cfg)
+		// service_tier is OpenAI's own field: only this backend may send it.
+		p = newOpenAICompatProvider(cfg, defaultOpenAIBaseURL, true)
 	case "gemini":
 		p = newGeminiProvider(cfg)
 	case "lmstudio", "omniroute":
 		// Local OpenAI-compatible gateways: same transport, no API key, the
 		// base_url from the config decides where requests go.
-		p = newLMStudioProvider(cfg)
+		p = newOpenAICompatProvider(cfg, defaultLMStudioBaseURL, false)
 	default:
 		return nil, fmt.Errorf("llm: unknown provider %q", cfg.Provider)
 	}

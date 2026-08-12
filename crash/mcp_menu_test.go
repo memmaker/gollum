@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -44,7 +45,7 @@ func TestMCPMenuTogglesAndReturnsToMainMenu(t *testing.T) {
 	}
 	m.layout(100, 30)
 
-	if !strings.Contains(m.toolListing(), "fake_tool") {
+	if !slices.Contains(m.toolMenuNames(), "fake_tool") {
 		t.Fatal("tool listing is missing fake_tool before toggling")
 	}
 
@@ -70,7 +71,7 @@ func TestMCPMenuTogglesAndReturnsToMainMenu(t *testing.T) {
 	if _, ok := m.mcpClients["fake"]; ok {
 		t.Fatal("client not removed after toggling off")
 	}
-	if strings.Contains(m.toolListing(), "fake_tool") {
+	if slices.Contains(m.toolMenuNames(), "fake_tool") {
 		t.Fatal("tool listing still shows fake_tool after its MCP was disabled")
 	}
 

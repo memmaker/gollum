@@ -31,12 +31,7 @@ func toolEnabled(name string, cfgs []ToolConfig) bool {
 // has enabled. The llm library ships no tools of its own — anything that talks
 // to a terminal lives here.
 func registerTools(s *llm.Session, toolConfigs []ToolConfig) {
-	enabledByName := make(map[string]bool)
-	for _, c := range toolConfigs {
-		enabledByName[c.Name] = c.Enabled
-	}
-
-	if enabledByName["user_choice"] {
+	if toolEnabled("user_choice", toolConfigs) {
 		s.AddTool(llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
@@ -61,7 +56,7 @@ func registerTools(s *llm.Session, toolConfigs []ToolConfig) {
 		}, execUserChoice)
 	}
 
-	if enabledByName["bash"] {
+	if toolEnabled("bash", toolConfigs) {
 		s.AddTool(llm.Tool{
 			Type: "function",
 			Function: llm.ToolFunction{
