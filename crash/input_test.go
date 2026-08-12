@@ -1,6 +1,39 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"charm.land/bubbles/v2/help"
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/memmaker/gollum/llm"
+)
+
+// A bracketed paste has to reach the prompt in both shapes, and a multiline
+// paste has to survive the one-row box's fold.
+func TestPaste(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.focusInput()
+
+	m.paste(tea.PasteMsg{Content: "one line"})
+	if got := m.value(); got != "one line" {
+		t.Fatalf("one-line paste = %q, want %q", got, "one line")
+	}
+
+	m.resetInput()
+	m.paste(tea.PasteMsg{Content: "a\nb"})
+	if got := m.value(); got != "a\nb" {
+		t.Fatalf("folded paste = %q, want %q", got, "a\nb")
+	}
+
+	m.multiline = true
+	m.multiLine.Reset()
+	m.focusInput()
+	m.paste(tea.PasteMsg{Content: "a\nb"})
+	if got := m.value(); got != "a\nb" {
+		t.Fatalf("multiline paste = %q, want %q", got, "a\nb")
+	}
+}
 
 // The multiline box's height is the only non-trivial arithmetic the input
 // mode adds: grow with content, floor at 3, and never crowd the animation

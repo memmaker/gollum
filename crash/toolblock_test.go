@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/help"
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/memmaker/gollum/llm"
 )
 
@@ -159,5 +162,53 @@ func TestSelectBlockWraps(t *testing.T) {
 	m.selectBlock(1)
 	if m.blockCursor != 1 {
 		t.Fatalf("down at the last block should stay put: got %d, want 1", m.blockCursor)
+	}
+}
+
+// Scrolling and block selection share the output pane, as they do in crush:
+// the arrows move one line and only carry the cursor along once its block has
+// left the screen, shift+arrows step block to block, and a page lands the
+// cursor on what the page brought into view.
+func TestOutputScrollAndBlockSelection(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(), blockCursor: -1}
+	m.layout(100, 20)
+	m.focus = paneOutput
+
+	// Two tool calls, a screenful of filler between them.
+	m.addToolCall(llm.ToolCall{ID: "1", Function: llm.ToolCallFunction{Name: "a"}})
+	m.transcript.WriteString(strings.Repeat("filler\n", 60))
+	m.addToolCall(llm.ToolCall{ID: "2", Function: llm.ToolCallFunction{Name: "b"}})
+	m.setOutput(m.transcript.String())
+	m.out.GotoTop()
+
+	// An arrow scrolls one line and leaves the cursor where it was.
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if got := m.out.YOffset(); got != 1 {
+		t.Fatalf("down scrolled to line %d, want one line", got)
+	}
+	if m.blockCursor != -1 {
+		t.Fatalf("a plain scroll moved the cursor to %d", m.blockCursor)
+	}
+
+	// shift+arrow steps block to block.
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift})
+	if m.blockCursor != 0 {
+		t.Fatalf("shift+down landed on block %d, want 0", m.blockCursor)
+	}
+
+	// Scrolling the selected block off the top carries the cursor along.
+	for range m.out.Height() + 2 {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	if m.blockCursor != 1 {
+		t.Fatalf("the cursor was left behind on block %d, want 1", m.blockCursor)
+	}
+
+	// A page lands the cursor on a block the page put in front of you.
+	m.out.GotoTop()
+	m.blockCursor = 1
+	m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.blockCursor != 0 {
+		t.Fatalf("pgup left the cursor on block %d, want the one in view (0)", m.blockCursor)
 	}
 }

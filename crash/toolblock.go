@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/memmaker/gollum/llm"
 
-	"github.com/memmaker/crash/ui"
+	markterm "github.com/memmaker/gollum/mark-term"
 )
 
 // prettyJSON reformats a tool call's argument JSON over multiple indented
@@ -54,7 +56,7 @@ func (m *tui) blockFull(b *toolBlock) bool {
 func (m *tui) renderToolCall(tc llm.ToolCall, full bool) string {
 	head := toolStyle.Render("⚒ " + tc.Function.Name)
 	if !full {
-		args := ellipsis(strings.TrimSpace(tc.Function.Arguments), max(m.out.Width()-ui.StringWidth(tc.Function.Name)-6, 10))
+		args := ellipsis(strings.TrimSpace(tc.Function.Arguments), max(m.out.Width()-markterm.StringWidth(tc.Function.Name)-6, 10))
 		return head + " " + dim.Render(args)
 	}
 	// Expanded: the JSON structure itself is the point, so it gets its own
@@ -237,25 +239,85 @@ func (m *tui) scrollToBlock(b *toolBlock) {
 	}
 }
 
-// handleBlockKey lets the output pane's tool blocks be picked and
-// folded/expanded without taking over the viewport's paging keys — pgup,
-// pgdown, g and G still scroll. Only kicks in once there is a block to pick;
-// otherwise up/down are left to scroll plain text as before.
-func (m *tui) handleBlockKey(msg string) bool {
+// blockInView reports whether any row of b is on screen in the output pane.
+func (m *tui) blockInView(b *toolBlock) bool {
+	top, bottom := b.callLine, b.callLine+b.callLines-1
+	if b.hasResult {
+		bottom = b.resultLine + b.resultLines - 1
+	}
+	return bottom >= m.out.YOffset() && top < m.out.YOffset()+m.out.Height()
+}
+
+// selectInView puts the cursor on the first block on screen, or the last one
+// when last is set. A screen with no block on it leaves the cursor alone.
+func (m *tui) selectInView(last bool) {
+	for i := range m.blocks {
+		if last {
+			i = len(m.blocks) - 1 - i
+		}
+		if m.blockInView(m.blocks[i]) {
+			m.blockCursor = i
+			m.redraw()
+			return
+		}
+	}
+}
+
+// handleBlockKey routes a key in the output pane, the way crush's chat pane
+// does it: the arrows scroll a line at a time and only drag the block cursor
+// along once it would otherwise leave the screen, shift+arrows step from block
+// to block, and the paging keys land the cursor on whatever the page put in
+// front of you. Returns false for keys it does not own, which go on to the
+// viewport's own keymap.
+func (m *tui) handleBlockKey(msg tea.KeyPressMsg) bool {
+	// The block keys are only live once there is a block to point at; without
+	// one every key here is a plain scroll, which the viewport already does.
 	if len(m.blocks) == 0 {
 		return false
 	}
-	switch msg {
+	switch msg.String() {
 	case "up", "k":
-		m.selectBlock(-1)
+		m.out.ScrollUp(1)
+		m.keepCursorInView(-1)
 	case "down", "j":
+		m.out.ScrollDown(1)
+		m.keepCursorInView(1)
+	case "shift+up", "K":
+		m.selectBlock(-1)
+	case "shift+down", "J":
 		m.selectBlock(1)
+	case "pgup":
+		m.out.PageUp()
+		m.selectInView(false)
+	case "pgdown":
+		m.out.PageDown()
+		m.selectInView(true)
+	case "g", "home":
+		m.out.GotoTop()
+		m.selectInView(false)
+	case "G", "end":
+		m.out.GotoBottom()
+		m.selectInView(true)
 	case "enter":
 		m.toggleSelectedBlock()
 	default:
 		return false
 	}
+	m.redraw()
 	return true
+}
+
+// keepCursorInView moves the block cursor one step in dir once the block it is
+// on has been scrolled off screen, so the mark follows the reading rather than
+// being left behind above or below it.
+func (m *tui) keepCursorInView(dir int) {
+	if m.blockCursor < 0 || m.blockCursor >= len(m.blocks) {
+		return
+	}
+	if m.blockInView(m.blocks[m.blockCursor]) {
+		return
+	}
+	m.selectBlock(dir)
 }
 
 // highlightBlock draws the green left bar Crush uses to mark the block-nav

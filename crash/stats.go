@@ -7,7 +7,7 @@ import (
 
 	"github.com/memmaker/gollum/llm"
 
-	"github.com/memmaker/crash/ui"
+	markterm "github.com/memmaker/gollum/mark-term"
 )
 
 // contextPreviewLen bounds the prompt snippet kept with each call: enough to
@@ -105,7 +105,7 @@ func escapePipes(s string) string { return strings.ReplaceAll(s, "|", `\|`) }
 // trimContext squeezes a prompt onto one short line.
 func trimContext(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	return ui.Truncate(s, "…", contextPreviewLen)
+	return markterm.Truncate(s, "…", contextPreviewLen)
 }
 
 func addUsage(a, b llm.Usage) llm.Usage {

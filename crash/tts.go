@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/memmaker/crash/ui"
+	markterm "github.com/memmaker/gollum/mark-term"
 )
 
 // tts speaks assistant prose through a local engine kept hot in --serve mode:
@@ -304,5 +304,5 @@ func (m *tui) setTTSLang(lang string) {
 // is pronunciation: an identifier like `send_tools` is two words to a listener,
 // never "send underscore tools".
 func speakable(block string) string {
-	return strings.TrimSpace(strings.ReplaceAll(ui.PlainText(block), "_", " "))
+	return strings.TrimSpace(strings.ReplaceAll(markterm.PlainText(block), "_", " "))
 }

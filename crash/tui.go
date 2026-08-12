@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/cursor"
 	"charm.land/bubbles/v2/help"
@@ -19,7 +20,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/memmaker/crash/ui"
+	markterm "github.com/memmaker/gollum/mark-term"
 	"github.com/memmaker/gollum/llm"
 )
 
@@ -97,8 +98,8 @@ var keys = keymap{
 	// and the point of this one is to say the history is there at all.
 	history: key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "history")),
 
-	blockUp:   key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "pick block")),
-	blockDown: key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "pick block")),
+	blockUp:   key.NewBinding(key.WithKeys("shift+up", "K"), key.WithHelp("shift+↑↓", "pick block")),
+	blockDown: key.NewBinding(key.WithKeys("shift+down", "J"), key.WithHelp("shift+↓", "pick block")),
 	fold:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "fold/expand")),
 }
 
@@ -165,6 +166,9 @@ type tui struct {
 
 	choice   *list.Model // non-nil while a choice overlay is up
 	onChoice func(int)
+	// choiceTitle is the overlay's question, wrapped and styled as its title
+	// bar — the list draws no title of its own, so a long one keeps its tail.
+	choiceTitle string
 
 	logo        string    // fixed wordmark above the sidebar, "" when it does not fit
 	page        *pager    // non-nil while the pager owns the screen
@@ -173,6 +177,11 @@ type tui struct {
 
 	blocks      []*toolBlock // every tool call (+ its result, once in) this session, in order
 	blockCursor int          // index into blocks the output pane's block-nav is on; -1 = none
+
+	// barVisible/barSeq drive the auto-hiding scrollbars, per pane: whether
+	// the bar is up, and which hide timer is the live one.
+	barVisible [3]bool
+	barSeq     [3]int
 
 	frame    int  // animation step for the bar across the top
 	debug    bool // /debug: show tool arguments and results in full
@@ -213,7 +222,7 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 	sess.SendRegisteredTools = settings.SendTools
 	sess.Stateless = !settings.Session
 	if settings.FullWidth {
-		ui.MaxWidth = 0
+		markterm.MaxWidth = 0
 	}
 	sess.Timeout = cfgs[0].Timeout
 	toolConfigs, _ := LoadToolConfigs()
@@ -268,8 +277,62 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 
 func (m *tui) Init() tea.Cmd { return cursor.Blink }
 
+// Scrollbars behave as crush's do: a bar is only ever there while its pane has
+// something to scroll, the output pane's shows on a scroll and goes away
+// barLinger later, and the sidebar's stands for as long as the sidebar has
+// focus. Content arriving does not raise a bar — following the newest line is
+// not scrolling anyone asked for.
+const barLinger = 2 * time.Second
+
+// barHideMsg drops a bar once its linger has run out. seq ignores the timers
+// left behind by earlier scrolls, so the newest scroll always wins.
+type barHideMsg struct {
+	pane pane
+	seq  int
+}
+
+// showBar raises a pane's scrollbar and schedules the hide that follows it.
+func (m *tui) showBar(p pane) tea.Cmd {
+	m.barVisible[p] = true
+	m.barSeq[p]++
+	seq := m.barSeq[p]
+	return tea.Tick(barLinger, func(time.Time) tea.Msg { return barHideMsg{pane: p, seq: seq} })
+}
+
+// scrollPane is the pane a scroll acts on: the focused one, except from the
+// prompt, which has nothing of its own to scroll and drives the output pane.
+func (m *tui) scrollPane() pane {
+	if m.focus == paneInput {
+		return paneOutput
+	}
+	return m.focus
+}
+
+// barActive reports whether a pane's scrollbar belongs on screen.
+func (m *tui) barActive(p pane) bool {
+	vp := m.viewportFor(p)
+	if vp.TotalLineCount() <= vp.Height() {
+		return false // nothing to scroll, so nothing to say
+	}
+	if p == paneSidebar {
+		// The sidebar only scrolls while it has focus, so focus is the whole
+		// answer — and losing it takes the bar away in the same frame.
+		return m.focus == paneSidebar
+	}
+	// The panes have no borders, so the bar is what says where focus is: it
+	// stands for as long as the output pane holds it, and otherwise only for
+	// the linger after a scroll driven from the prompt.
+	return m.focus == paneOutput || m.barVisible[p]
+}
+
 func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case barHideMsg:
+		if msg.seq == m.barSeq[msg.pane] {
+			m.barVisible[msg.pane] = false
+		}
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.layout(msg.Width, msg.Height)
 		return m, nil
@@ -283,7 +346,7 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// means the terminal will never do grapheme widths, which reads like an
 		// answer about the mode but is a no: iTerm2 replies 4 here.
 		if msg.Mode == ansi.ModeUnicodeCore && graphemeWidths(msg.Value) {
-			ui.WidthMethod = ansi.GraphemeWidth
+			markterm.WidthMethod = ansi.GraphemeWidth
 			m.layout(m.width, m.height)
 		}
 		return m, nil
@@ -361,6 +424,13 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.mouse(msg)
 
+	case tea.PasteMsg:
+		// Only the prompt takes text; a paste anywhere else has nowhere to land.
+		if m.page == nil && m.choice == nil && m.focus == paneInput {
+			return m, m.paste(msg)
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		if m.page != nil {
 			if key.Matches(msg, keys.cancel) || key.Matches(msg, keys.quit) {
@@ -405,6 +475,11 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "shift+down" {
 				return m, m.scroll(tea.KeyPressMsg{Code: tea.KeyDown})
 			}
+			// pgup/pgdn read the transcript from the prompt, in either shape
+			// of the box — the box itself walks with the arrows.
+			if msg.Code == tea.KeyPgUp || msg.Code == tea.KeyPgDown {
+				return m, m.scroll(msg)
+			}
 			if key.Matches(msg, keys.multiline) {
 				m.toggleMultiline()
 				return m, nil
@@ -430,22 +505,16 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.oneLine, cmd = m.oneLine.Update(msg)
 				return m, cmd
 			}
-			if msg.Code == tea.KeyPgUp {
-				m.pageMultiline(true)
-				return m, nil
-			}
-			if msg.Code == tea.KeyPgDown {
-				m.pageMultiline(false)
-				return m, nil
-			}
 			var cmd tea.Cmd
 			m.multiLine, cmd = m.multiLine.Update(msg)
 			// The box grows and shrinks with its content as you type.
 			m.layout(m.width, m.height)
 			return m, cmd
 		}
-		if m.focus == paneOutput && m.handleBlockKey(msg.String()) {
-			return m, nil
+		if m.focus == paneOutput && m.handleBlockKey(msg) {
+			// Block-nav scrolls the pane to the block it lands on, so it
+			// raises the bar exactly as a scroll key does.
+			return m, m.showBar(paneOutput)
 		}
 		return m, m.scroll(msg)
 	}
@@ -496,7 +565,7 @@ func (m *tui) submit() tea.Cmd {
 	// Wrapped like every other line that reaches the pane. Written raw, a long
 	// prompt ran past the pane edge and the viewport hard-truncated it, which
 	// is also where an emoji-heavy prompt pushed the scrollbar out of line.
-	m.transcript.WriteString(label.Render(ui.Wrap("> "+text, max(m.out.Width(), 10))) + "\n\n")
+	m.transcript.WriteString(label.Render(markterm.Wrap("> "+text, max(m.out.Width(), 10))) + "\n\n")
 	m.setOutput(m.transcript.String())
 	m.out.GotoBottom()
 
@@ -567,7 +636,7 @@ func (m *tui) flushSettled() {
 	m.answer.Reset()
 	m.answer.WriteString(rest)
 	m.speak(settled) // spoken from the markdown, before it grows ANSI
-	m.transcript.WriteString(ui.RenderMarkdown(settled, m.out.Width()) + "\n\n")
+	m.transcript.WriteString(markterm.RenderMarkdown(settled, m.out.Width()) + "\n\n")
 }
 
 // settledPrefix splits a partial markdown answer into the part that is final
@@ -644,7 +713,7 @@ func (m *tui) flushAnswer() {
 	}
 	m.speak(body)
 	if !m.raw {
-		body = ui.RenderMarkdown(body, m.out.Width())
+		body = markterm.RenderMarkdown(body, m.out.Width())
 	}
 	m.transcript.WriteString(body + "\n\n")
 }
@@ -665,13 +734,13 @@ func (m *tui) endBlock() {
 // Cells, not bytes: len(s) counts UTF-8 bytes, so an emoji-heavy string
 // compared true and then got sliced mid-rune by s[:width], corrupting the
 // line and throwing off the pane's rendered width — the same class of bug
-// fixed in ui.visibleLen for the pager's scrollbar.
+// fixed in markterm.visibleLen for the pager's scrollbar.
 func ellipsis(s string, width int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if ui.StringWidth(s) <= width {
+	if markterm.StringWidth(s) <= width {
 		return s
 	}
-	return ui.Truncate(s, "…", width)
+	return markterm.Truncate(s, "…", width)
 }
 
 func onOff(b bool) string {
@@ -750,6 +819,9 @@ func (m *tui) closeChoice(idx int) {
 
 func (m *tui) cycleFocus() {
 	m.focus = (m.focus + 1) % 3
+	if m.focus == paneSidebar && !m.sidebarFocusable() {
+		m.focus = paneInput
+	}
 	if m.focus == paneInput {
 		m.focusInput()
 	} else {
@@ -760,12 +832,12 @@ func (m *tui) cycleFocus() {
 	m.redraw()
 }
 
-// scroll routes a key to whichever pane has focus.
+// scroll routes a key to whichever pane has focus, and raises that pane's
+// scrollbar for as long as it lingers. The prompt has nothing of its own to
+// scroll, so the keys that reach here from it move the output pane.
 func (m *tui) scroll(msg tea.KeyPressMsg) tea.Cmd {
-	vp := &m.out
-	if m.focus == paneSidebar {
-		vp = &m.side
-	}
+	p := m.scrollPane()
+	vp := m.viewportFor(p)
 	switch {
 	case key.Matches(msg, keys.top):
 		vp.GotoTop()
@@ -774,9 +846,9 @@ func (m *tui) scroll(msg tea.KeyPressMsg) tea.Cmd {
 	default:
 		updated, cmd := vp.Update(msg)
 		*vp = updated
-		return cmd
+		return tea.Batch(cmd, m.showBar(p))
 	}
-	return nil
+	return m.showBar(p)
 }
 
 // layout splits the screen: output and sidebar side by side above the input
@@ -881,8 +953,21 @@ func (m *tui) refreshSidebar() {
 	// Everything folds inside the pane rather than being cut: a model slug or
 	// a path is worth reading to its end, and neither has spaces to break on,
 	// so long words break mid-word.
-	m.sideContent = ui.Wrap(b.String(), m.side.Width())
+	m.sideContent = markterm.Wrap(b.String(), m.side.Width())
 	m.side.SetContent(m.sel.highlight(m.sideContent, paneSidebar))
+	// The sidebar may have just shrunk out of the cycle from under the focus.
+	if m.focus == paneSidebar && !m.sidebarFocusable() {
+		m.focus = paneInput
+		m.focusInput()
+	}
+}
+
+// sidebarFocusable reports whether tab should stop at the sidebar: only when
+// it is on screen at all and holds more than it can show. There is nothing to
+// do in a pane that is entirely visible and has no cursor of its own, so it is
+// left out of the cycle rather than made a stop that does nothing.
+func (m *tui) sidebarFocusable() bool {
+	return m.width >= 90 && m.side.TotalLineCount() > m.side.Height()
 }
 
 // graphemeWidths reports whether a DECRPM answer for mode 2027 means the
@@ -919,7 +1004,7 @@ func (m *tui) render() string {
 		return "…"
 	}
 	canvas := uv.NewScreenBuffer(m.width, m.height)
-	canvas.Method = ui.WidthMethod
+	canvas.Method = markterm.WidthMethod
 	m.paint(canvas)
 	return canvas.Render()
 }
@@ -937,7 +1022,7 @@ func (m *tui) paint(scr uv.ScreenBuffer) {
 
 	paneH := m.out.Height()
 	paint(scr, m.out.View(), uv.Rect(0, y, m.out.Width(), paneH))
-	paint(scr, scrollbar(m.out, m.focus == paneOutput), uv.Rect(m.out.Width(), y, 1, paneH))
+	paint(scr, scrollbar(m.out, m.barActive(paneOutput)), uv.Rect(m.out.Width(), y, 1, paneH))
 	if m.width >= 90 {
 		x, sideY := m.out.Width()+1, y
 		// The logo is fixed above the sidebar rather than scrolling inside it.
@@ -947,7 +1032,7 @@ func (m *tui) paint(scr uv.ScreenBuffer) {
 			sideY += logoH
 		}
 		paint(scr, m.side.View(), uv.Rect(x, sideY, m.side.Width(), m.side.Height()))
-		paint(scr, scrollbar(m.side, m.focus == paneSidebar),
+		paint(scr, scrollbar(m.side, m.barActive(paneSidebar)),
 			uv.Rect(x+m.side.Width(), sideY, 1, m.side.Height()))
 	}
 	y += paneH
@@ -978,7 +1063,7 @@ func paint(scr uv.ScreenBuffer, s string, area uv.Rectangle) {
 // advances by wcwidth, which puts a modal's right edge in the wrong column.
 func boxSize(s string) (w, h int) {
 	for _, line := range strings.Split(s, "\n") {
-		w = max(w, ui.StringWidth(line))
+		w = max(w, markterm.StringWidth(line))
 		h++
 	}
 	return w, h
@@ -991,31 +1076,23 @@ const (
 )
 
 // scrollbar draws a one-column track for a viewport, sized and positioned from
-// how much of the content is on screen. Content that fits gets a blank column,
-// so the pane width never changes underneath it.
-func scrollbar(vp viewport.Model, focused bool) string {
+// how much of the content is on screen. It only shows while active — the bar
+// has just moved or its pane has just taken focus; the rest of the time the
+// column is blank, so the pane width never changes underneath it.
+func scrollbar(vp viewport.Model, active bool) string {
 	h := vp.Height()
 	if h <= 0 {
 		return ""
 	}
-	thumb, pos := h, 0
 	total := vp.TotalLineCount()
-	scrollable := total > h
-	if scrollable {
-		thumb = max(1, h*h/total)
-		pos = int(float64(h-thumb)*vp.ScrollPercent() + 0.5)
-	}
-	if !scrollable && !focused {
-		// Nothing to scroll and nothing to point at: the bar says neither, so
-		// it goes away. Its column stays, or the pane would jump on focus.
+	if !active || total <= h {
+		// Idle, or nothing to scroll: the bar says nothing worth a column of
+		// glyphs. Its column stays, or the pane would jump when it comes back.
 		return strings.TrimRight(strings.Repeat(" \n", h), "\n")
 	}
-	// A pane whose content fits still shows a full-height thumb: the bar is
-	// where focus is visible now that the panes have no borders.
-	thumbStyle := dim
-	if focused {
-		thumbStyle = focusStyle
-	}
+	thumb := max(1, h*h/total)
+	pos := int(float64(h-thumb)*vp.ScrollPercent() + 0.5)
+	thumbStyle := focusStyle
 	rows := make([]string, h)
 	for i := range rows {
 		if i >= pos && i < pos+thumb {
@@ -1043,7 +1120,9 @@ func (m *tui) helpLine() string {
 		}
 	case paneOutput:
 		if len(m.blocks) > 0 {
-			b = []key.Binding{keys.blockUp, keys.blockDown, keys.fold, keys.top, keys.bottom, keys.next, keys.menu, keys.quit}
+			// The arrows scroll here as they do anywhere; the block cursor
+			// rides along on them and steps on shift+arrows.
+			b = []key.Binding{keys.up, keys.down, keys.blockUp, keys.fold, keys.next, keys.menu, keys.quit}
 			break
 		}
 		fallthrough
@@ -1059,7 +1138,7 @@ func (m *tui) padStatus(left string) string {
 	if m.gitStatus == "" {
 		return left
 	}
-	gap := m.width - ui.StringWidth(left) - ui.StringWidth(m.gitStatus)
+	gap := m.width - markterm.StringWidth(left) - markterm.StringWidth(m.gitStatus)
 	if gap < 1 {
 		return left
 	}

@@ -8,7 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/memmaker/crash/ui"
+	markterm "github.com/memmaker/gollum/mark-term"
 )
 
 // The prompt has two shapes. Most of the time it is a single row — a
@@ -101,6 +101,30 @@ func (m *tui) setOneLine(s string) {
 	m.oneLine.CursorEnd()
 }
 
+// paste hands a bracketed paste to the active widget. Both widgets already
+// handle tea.PasteMsg; the one-row box gets the newlines folded first, since
+// textinput's own sanitizer would turn each into a space. The fold state is
+// rebuilt from the whole resulting value, so value hands the original text
+// back the same way a folded history entry does.
+func (m *tui) paste(msg tea.PasteMsg) tea.Cmd {
+	if m.multiline {
+		var cmd tea.Cmd
+		m.multiLine, cmd = m.multiLine.Update(msg)
+		m.layout(m.width, m.height)
+		return cmd
+	}
+	folded := strings.Contains(msg.Content, "\n") || m.foldedDisplay != ""
+	msg.Content = strings.ReplaceAll(msg.Content, "\n", newlineFold)
+	var cmd tea.Cmd
+	m.oneLine, cmd = m.oneLine.Update(msg)
+	m.foldedDisplay, m.foldedOrig = "", ""
+	if folded {
+		v := m.oneLine.Value()
+		m.foldedDisplay, m.foldedOrig = v, strings.ReplaceAll(v, newlineFold, "\n")
+	}
+	return cmd
+}
+
 // resetInput clears the active widget, e.g. once its content is sent.
 func (m *tui) resetInput() {
 	m.foldedDisplay, m.foldedOrig = "", ""
@@ -149,21 +173,8 @@ func (m *tui) setInputWidth(w int) {
 	// -1: the cursor renders as an extra column past Width when it sits at
 	// line end, so reserving Width up to the full remaining space pushes it
 	// past the terminal edge.
-	m.oneLine.SetWidth(max(w-ui.StringWidth(m.oneLine.Prompt)-1, 1))
+	m.oneLine.SetWidth(max(w-markterm.StringWidth(m.oneLine.Prompt)-1, 1))
 	m.multiLine.SetWidth(max(w-multilineBorderCols, 1))
-}
-
-// pageMultiline moves the multiline box's cursor by a page — its own content
-// height — one visual row at a time through the textarea's own up/down
-// handling, so the box scrolls to follow exactly as a single arrow key would.
-func (m *tui) pageMultiline(up bool) {
-	step := tea.KeyPressMsg{Code: tea.KeyDown}
-	if up {
-		step = tea.KeyPressMsg{Code: tea.KeyUp}
-	}
-	for i := 0; i < m.multiLine.Height(); i++ {
-		m.multiLine, _ = m.multiLine.Update(step)
-	}
 }
 
 // toggleMultiline flips the input between its one-row prompt and the growing
@@ -216,7 +227,7 @@ func wrappedRows(s string, width int) int {
 	}
 	n := 0
 	for _, line := range strings.Split(s, "\n") {
-		n += max((ui.StringWidth(line)+width-1)/width, 1)
+		n += max((markterm.StringWidth(line)+width-1)/width, 1)
 	}
 	return max(n, 1)
 }

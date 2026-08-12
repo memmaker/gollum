@@ -104,10 +104,12 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 	mouse := msg.Mouse()
 	switch msg.(type) {
 	case tea.MouseWheelMsg:
-		vp := m.viewportFor(m.focus)
+		// The wheel scrolls whatever the keys would, and raises the same bar.
+		p := m.scrollPane()
+		vp := m.viewportFor(p)
 		updated, cmd := vp.Update(msg)
 		*vp = updated
-		return cmd
+		return tea.Batch(cmd, m.showBar(p))
 
 	case tea.MouseClickMsg:
 		if mouse.Button != tea.MouseLeft {

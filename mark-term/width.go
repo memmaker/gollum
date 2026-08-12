@@ -1,4 +1,4 @@
-package ui
+package markterm
 
 import "github.com/charmbracelet/x/ansi"
 

@@ -11,7 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 
-	"github.com/memmaker/crash/ui"
+	markterm "github.com/memmaker/gollum/mark-term"
 	"github.com/memmaker/gollum/llm"
 )
 
@@ -93,7 +93,7 @@ func (p *pager) mouse(msg tea.MouseMsg) {
 func (p *pager) redraw() {
 	p.content = p.source
 	if p.markdown {
-		p.content = ui.RenderMarkdown(p.source, p.vp.Width())
+		p.content = markterm.RenderMarkdown(p.source, p.vp.Width())
 	}
 	p.vp.SetContent(p.sel.highlight(p.content, panePager))
 }
@@ -139,7 +139,7 @@ func (p *pager) paint(scr uv.ScreenBuffer, h help.Model, area uv.Rectangle) {
 	help := h.ShortHelpView([]key.Binding{keys.up, keys.down, keys.top, keys.bottom, keys.render, keys.cancel})
 	helpW := w
 	if p.note != "" {
-		noteW := ui.StringWidth(p.note)
+		noteW := markterm.StringWidth(p.note)
 		helpW = max(w-noteW-2, 0)
 		uv.NewStyledString(dim.Render(p.note)).Draw(scr, uv.Rect(x+w-noteW, y, noteW, 1))
 	}

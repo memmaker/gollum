@@ -8,8 +8,9 @@ import (
 
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
-	"github.com/memmaker/crash/ui"
+	markterm "github.com/memmaker/gollum/mark-term"
 	"github.com/memmaker/gollum/llm"
 )
 
@@ -22,18 +23,45 @@ type choiceItem struct {
 
 func (c choiceItem) FilterValue() string { return c.text }
 
-// choiceDelegate draws one row per item — the default delegate spends three.
-type choiceDelegate struct{}
+// choiceDelegate draws one item per row where they fit — the default delegate
+// spends three — and wraps the ones that do not. A list delegate has a single
+// height for every row, so that height is the tallest option's, computed in
+// openChoice where the width is known.
+type choiceDelegate struct{ height int }
 
-func (choiceDelegate) Height() int                         { return 1 }
+// markerWidth is the "▸ " / "  " gutter every option line is drawn behind.
+const markerWidth = 2
+
+func (d choiceDelegate) Height() int                       { return d.height }
 func (choiceDelegate) Spacing() int                        { return 0 }
 func (choiceDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
-func (choiceDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	line := "  " + item.(choiceItem).text
-	if index == m.Index() {
-		line = label.Render("▸ " + item.(choiceItem).text)
+func (d choiceDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	lines := strings.Split(markterm.Wrap(item.(choiceItem).text, m.Width()-markerWidth), "\n")
+	for i, line := range lines {
+		marker := "  "
+		if i == 0 && index == m.Index() {
+			marker = "▸ "
+		}
+		lines[i] = marker + line
+		if index == m.Index() {
+			lines[i] = label.Render(lines[i])
+		}
 	}
-	fmt.Fprint(w, ui.Truncate(line, "…", m.Width()))
+	// Every row spends the same height, so a short option pads out rather than
+	// sliding the ones below it up over the row the list reserved for it.
+	for len(lines) < d.height {
+		lines = append(lines, "")
+	}
+	fmt.Fprint(w, strings.Join(lines[:d.height], "\n"))
+}
+
+// choiceRowHeight is the rows one option needs at width, wrapping included.
+func choiceRowHeight(options []string, width int) int {
+	h := 1
+	for _, o := range options {
+		h = max(h, lipgloss.Height(markterm.Wrap(o, width-markerWidth)))
+	}
+	return h
 }
 
 // maxChoiceRows caps the overlay before it swallows the screen; past this the
@@ -83,17 +111,24 @@ func (m *tui) openChoice(title string, options []string, pick func(int)) {
 		items[i] = choiceItem{idx: i, text: o}
 	}
 	w := min(max(m.width*2/3, 30), m.width-4)
-	rows := min(len(options), maxChoiceRows)
-	maxH := max(m.height-4, 4)
-	h := min(rows+1, maxH)
+	rowH := choiceRowHeight(options, w-2)
+	rows := min(len(options), max(maxChoiceRows/rowH, 1))
 
-	l := list.New(items, choiceDelegate{}, w-2, h)
-	l.Title = title
-	// The list ships its own purple title bar; the palette owns that colour.
-	l.Styles.Title = titleStyle
-	// Same for the filter's green prompt and pink cursor. l.Styles.Filter is
-	// only a template — the input list.New already built is what renders, so
-	// the styles go straight on it.
+	// The list's own title bar is one row and truncates whatever does not fit,
+	// which loses the end of a question a tool asked in a sentence. Draw it
+	// above the list instead, wrapped over as many rows as it needs, and give
+	// the list the height that leaves. The accent bar stays as wide as the text
+	// it holds — run out to the box's edge it reads as a banner, not a title.
+	m.choiceTitle = titleStyle.Render(markterm.Wrap(title, w-4))
+	titleH := lipgloss.Height(m.choiceTitle)
+	maxH := max(m.height-4-titleH, 4)
+	h := min(rows*rowH+1, maxH)
+
+	l := list.New(items, choiceDelegate{height: rowH}, w-2, h)
+	l.SetShowTitle(false)
+	// The filter's green prompt and pink cursor belong to the palette too.
+	// l.Styles.Filter is only a template — the input list.New already built is
+	// what renders, so the styles go straight on it.
 	fs := l.FilterInput.Styles()
 	fs.Focused.Prompt = accentStyle
 	fs.Blurred.Prompt = accentStyle
@@ -119,7 +154,7 @@ func (m *tui) choiceView() string {
 	if m.choice == nil {
 		return ""
 	}
-	return focusedStyle.Render(m.choice.View())
+	return focusedStyle.Render(lipgloss.JoinVertical(lipgloss.Left, m.choiceTitle, m.choice.View()))
 }
 
 // applyModel switches the running session to the chosen provider and model,
@@ -165,7 +200,7 @@ func substringFilter(term string, targets []string) []list.Rank {
 func (m *tui) saveSettings() {
 	if err := SaveSettings(Settings{
 		SendTools:  m.sess.SendRegisteredTools,
-		FullWidth:  ui.MaxWidth == 0,
+		FullWidth:  markterm.MaxWidth == 0,
 		Session:    !m.sess.Stateless,
 		TTSAnswers: m.ttsOn,
 		TTSLang:    m.ttsLang,
@@ -215,14 +250,14 @@ func (m *tui) openMenu() {
 			m.setOutput(m.transcript.String())
 			m.out.GotoBottom()
 		}, true, false},
-		{"Use full output width: " + onOff(ui.MaxWidth == 0), func() {
-			if ui.MaxWidth == 0 {
-				ui.MaxWidth = ui.DefaultMaxWidth
+		{"Use full output width: " + onOff(markterm.MaxWidth == 0), func() {
+			if markterm.MaxWidth == 0 {
+				markterm.MaxWidth = markterm.DefaultMaxWidth
 			} else {
-				ui.MaxWidth = 0
+				markterm.MaxWidth = 0
 			}
 			m.saveSettings()
-			m.transcript.WriteString(dim.Render("full output width "+onOff(ui.MaxWidth == 0)) + "\n\n")
+			m.transcript.WriteString(dim.Render("full output width "+onOff(markterm.MaxWidth == 0)) + "\n\n")
 			m.setOutput(m.transcript.String())
 			m.out.GotoBottom()
 		}, true, false},

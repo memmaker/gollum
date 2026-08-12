@@ -16,7 +16,7 @@ import (
 
 	"github.com/memmaker/gollum/llm"
 
-	"github.com/memmaker/crash/ui"
+	markterm "github.com/memmaker/gollum/mark-term"
 )
 
 // The scrollbar is the only arithmetic in the view: a thumb that leaves the
@@ -27,16 +27,16 @@ func TestScrollbar(t *testing.T) {
 	if got := strings.Count(scrollbar(vp, true), "\n") + 1; got != 10 {
 		t.Fatalf("short content: got %d rows, want 10", got)
 	}
-	// Content that fits fills the bar: with no borders left, the scrollbar is
-	// what shows which pane has focus.
-	if got := strings.Count(scrollbar(vp, true), scrollbarThumb); got != 10 {
-		t.Fatalf("short content drew %d thumb rows, want a full 10", got)
-	}
-	if scrollbar(vp, true) == scrollbar(vp, false) {
-		t.Fatal("focused and unfocused scrollbars look the same")
+	// Content that fits has nothing to point at, so the column stays empty
+	// however active the bar is.
+	if got := strings.Count(scrollbar(vp, true), scrollbarThumb); got != 0 {
+		t.Fatalf("short content drew %d thumb rows, want none", got)
 	}
 
 	vp.SetContent(strings.Repeat("line\n", 100))
+	if scrollbar(vp, true) == scrollbar(vp, false) {
+		t.Fatal("active and idle scrollbars look the same")
+	}
 	for _, at := range []func(){func() { vp.GotoTop() }, func() { vp.GotoBottom() }} {
 		at()
 		rows := strings.Split(scrollbar(vp, true), "\n")
@@ -95,6 +95,70 @@ func TestChoiceOverlay(t *testing.T) {
 	}
 	if m.render() != plain {
 		t.Fatal("closing the overlay did not restore the plain view")
+	}
+}
+
+// A tool asking a question in a sentence gets the whole sentence on screen:
+// the title wraps over as many rows as it needs, and the overlay still fits
+// the frame it is drawn into.
+func TestChoiceWrapsLongTitle(t *testing.T) {
+	m := &tui{
+		sess:    llm.NewSession(nil, ""),
+		cfgs:    []llm.Config{{Provider: "openai", Model: "gpt-5-mini"}},
+		oneLine: newOneLineInput(), multiLine: newMultiLineInput(),
+		help:    help.New(),
+		current: "openai/gpt-5-mini",
+	}
+	m.layout(100, 30)
+	plain := m.render()
+
+	const question = "Which of these animals would you rather take along on a very long walk " +
+		"through the woods, and why does it have to be that one in particular?"
+	m.openChoice(question, []string{"cat", "dog", "owl"}, func(int) {})
+
+	title := ansi.Strip(m.choiceTitle)
+	if lipgloss.Height(title) < 2 {
+		t.Fatalf("long title stayed on one row: %q", title)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(title), " "), question) {
+		t.Fatalf("title lost text:\n%s", title)
+	}
+
+	withModal := m.render()
+	if lipgloss.Height(plain) != lipgloss.Height(withModal) || lipgloss.Width(plain) != lipgloss.Width(withModal) {
+		t.Fatalf("wrapped title resized the frame: %dx%d then %dx%d",
+			lipgloss.Width(plain), lipgloss.Height(plain),
+			lipgloss.Width(withModal), lipgloss.Height(withModal))
+	}
+	if !strings.Contains(ansi.Strip(withModal), "in particular?") {
+		t.Fatal("the end of the question never made it on screen")
+	}
+}
+
+// Options can be sentences too: a row wraps over as many lines as it needs,
+// and every row is given the same height so none slides over another.
+func TestChoiceWrapsLongOptions(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), cfgs: []llm.Config{{Provider: "p"}}, oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 30)
+
+	const long = "take the dog, because it will happily walk all day and never once ask how much further it is"
+	m.openChoice("pick", []string{"cat", long}, func(int) {})
+
+	view := ansi.Strip(m.choiceView())
+	if !strings.Contains(view, "once ask how much further it is") {
+		t.Fatalf("long option lost its tail:\n%s", view)
+	}
+	if strings.Contains(view, "…") {
+		t.Fatalf("long option was truncated:\n%s", view)
+	}
+	rowH := choiceRowHeight([]string{long}, m.choice.Width())
+	if rowH < 2 {
+		t.Fatalf("delegate row height is %d, want room for the wrapped option", rowH)
+	}
+	// Two options at rowH rows each, and nothing overlapping: the box is at
+	// least that tall.
+	if got := lipgloss.Height(m.choiceView()); got < 2*rowH {
+		t.Fatalf("overlay is %d rows, too short for two %d-row options", got, rowH)
 	}
 }
 
@@ -377,7 +441,7 @@ func TestPagerMouseSelection(t *testing.T) {
 		t.Fatalf("clipboard holds %q", got)
 	}
 	buf := uv.NewScreenBuffer(60, 20)
-	buf.Method = ui.WidthMethod
+	buf.Method = markterm.WidthMethod
 	p.paint(buf, help.New(), buf.Bounds())
 	if !strings.Contains(buf.Render(), "copied") {
 		t.Fatal("the pager does not confirm the copy on screen")
@@ -390,11 +454,11 @@ func TestPagerMouseSelection(t *testing.T) {
 	}
 }
 
-// A pane that fits its content and has no focus shows no bar at all, but keeps
-// the column so nothing shifts when focus arrives.
+// An idle bar shows nothing at all — scrollable or not — but keeps its column
+// so nothing shifts when it comes back.
 func TestScrollbarHiddenWhenIdle(t *testing.T) {
 	vp := viewport.New(viewport.WithWidth(10), viewport.WithHeight(4))
-	vp.SetContent("one\ntwo")
+	vp.SetContent("1\n2\n3\n4\n5\n6")
 
 	hidden := scrollbar(vp, false)
 	if strings.TrimSpace(hidden) != "" {
@@ -406,13 +470,80 @@ func TestScrollbarHiddenWhenIdle(t *testing.T) {
 	if got := lipgloss.Height(hidden); got != 4 {
 		t.Fatalf("idle scrollbar height = %d, want 4", got)
 	}
-	// Focused, or scrollable, and it is drawn again.
 	if strings.TrimSpace(ansi.Strip(scrollbar(vp, true))) == "" {
-		t.Fatal("focused scrollbar is blank")
+		t.Fatal("active scrollbar is blank")
 	}
-	vp.SetContent("1\n2\n3\n4\n5\n6")
-	if strings.TrimSpace(ansi.Strip(scrollbar(vp, false))) == "" {
-		t.Fatal("scrollable pane shows no bar")
+	// Content that fits leaves the column empty even while active.
+	vp.SetContent("one\ntwo")
+	if strings.TrimSpace(ansi.Strip(scrollbar(vp, true))) != "" {
+		t.Fatal("a pane that fits its content shows a bar")
+	}
+}
+
+// The output bar comes up on a scroll and goes down when its own hide timer
+// comes back; content arriving on its own raises nothing.
+func TestScrollbarAutoHide(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 20)
+	// From the prompt: the output bar is not a focus mark here, so it is only
+	// ever up for the linger after a scroll.
+	m.focus = paneInput
+	m.setOutput(strings.Repeat("line\n", 50))
+	if m.barActive(paneOutput) {
+		t.Fatal("content arriving raised the output bar")
+	}
+
+	m.scroll(tea.KeyPressMsg{Code: tea.KeyUp})
+	if !m.barActive(paneOutput) {
+		t.Fatal("the output bar is down right after a scroll")
+	}
+
+	// A stale timer — one whose scroll has been superseded — leaves it up.
+	m.Update(barHideMsg{pane: paneOutput, seq: m.barSeq[paneOutput] - 1})
+	if !m.barActive(paneOutput) {
+		t.Fatal("a stale hide timer took the bar down")
+	}
+	m.Update(barHideMsg{pane: paneOutput, seq: m.barSeq[paneOutput]})
+	if m.barActive(paneOutput) {
+		t.Fatal("the bar is still up after its own hide timer")
+	}
+
+	// Focus is the other way the bar comes up: it marks where focus is, so it
+	// stands for as long as the output pane holds it.
+	m.focus = paneOutput
+	if !m.barActive(paneOutput) {
+		t.Fatal("the output pane has focus and no bar to say so")
+	}
+	m.Update(barHideMsg{pane: paneOutput, seq: m.barSeq[paneOutput]})
+	if !m.barActive(paneOutput) {
+		t.Fatal("a hide timer took the focused pane's bar down")
+	}
+
+	// A pane with nothing to scroll never shows one, however fresh the scroll.
+	m.setOutput("one line")
+	m.scroll(tea.KeyPressMsg{Code: tea.KeyUp})
+	if m.barActive(paneOutput) {
+		t.Fatal("a pane that fits its content shows a bar")
+	}
+}
+
+// The sidebar's bar stands for exactly as long as the sidebar has focus.
+func TestSidebarScrollbarFollowsFocus(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 20)
+	m.sideContent = strings.Repeat("line\n", 50)
+	m.side.SetContent(m.sideContent)
+
+	if m.barActive(paneSidebar) {
+		t.Fatal("the sidebar bar is up without focus")
+	}
+	m.focus = paneSidebar
+	if !m.barActive(paneSidebar) {
+		t.Fatal("the sidebar bar is down while the sidebar has focus")
+	}
+	m.focus = paneInput
+	if m.barActive(paneSidebar) {
+		t.Fatal("the sidebar bar outlived its focus")
 	}
 }
 
@@ -619,29 +750,37 @@ func TestMultilineToggleDoesNotLoseNewlines(t *testing.T) {
 	}
 }
 
-// The default textarea keymap has no page keys at all — pgup/pgdn have to be
-// wired up by hand, one row-step at a time, so the box's own viewport follows
-// exactly as a single arrow key would.
-func TestMultilinePageKeys(t *testing.T) {
-	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
-	m.layout(60, 20)
-	m.focus = paneInput
-	m.toggleMultiline()
+// pgup/pgdn read the transcript without leaving the prompt, in either shape of
+// the input box, and they raise the output pane's bar as any scroll does.
+func TestPageKeysFromInput(t *testing.T) {
+	for _, multiline := range []bool{false, true} {
+		t.Run(fmt.Sprint("multiline=", multiline), func(t *testing.T) {
+			m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+			m.layout(100, 20)
+			m.focus = paneInput
+			if multiline {
+				m.toggleMultiline()
+			}
+			m.setOutput(strings.Repeat("line\n", 200))
+			m.out.GotoBottom()
+			bottom := m.out.YOffset()
 
-	lines := make([]string, 20)
-	for i := range lines {
-		lines[i] = fmt.Sprintf("line%d", i)
-	}
-	m.setValue(strings.Join(lines, "\n")) // cursor ends on the last line, 19
-	height := m.multiLine.Height()
-
-	m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
-	if want := 19 - height; m.multiLine.Line() != want {
-		t.Fatalf("pgup landed on line %d, want %d (a page up from the bottom)", m.multiLine.Line(), want)
-	}
-	m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
-	if m.multiLine.Line() != 19 {
-		t.Fatalf("pgdown landed on line %d, want back to the bottom (19)", m.multiLine.Line())
+			m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+			up := m.out.YOffset()
+			if up >= bottom {
+				t.Fatalf("pgup left the output pane at %d, want above %d", up, bottom)
+			}
+			if !m.barActive(paneOutput) {
+				t.Fatal("scrolling from the prompt raised no scrollbar")
+			}
+			m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+			if got := m.out.YOffset(); got != bottom {
+				t.Fatalf("pgdown left the output pane at %d, want back at %d", got, bottom)
+			}
+			if got := m.value(); got != "" {
+				t.Fatalf("the page keys typed %q into the prompt", got)
+			}
+		})
 	}
 }
 
@@ -674,8 +813,8 @@ func TestEmojiKeepsColumnsPut(t *testing.T) {
 
 	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
 		t.Run(fmt.Sprint(method), func(t *testing.T) {
-			defer func(prev ansi.Method) { ui.WidthMethod = prev }(ui.WidthMethod)
-			ui.WidthMethod = method
+			defer func(prev ansi.Method) { markterm.WidthMethod = prev }(markterm.WidthMethod)
+			markterm.WidthMethod = method
 
 			m := &tui{
 				sess:    llm.NewSession(nil, ""),
@@ -690,6 +829,7 @@ func TestEmojiKeepsColumnsPut(t *testing.T) {
 				m.transcript.WriteString(emoji + "\n")
 			}
 			m.setOutput(m.transcript.String())
+			m.barVisible[paneOutput] = true // the bar has to be on screen to be measured
 
 			lines := strings.Split(m.render(), "\n")
 			if len(lines) != h {
@@ -743,8 +883,8 @@ func TestGraphemeWidthsMatchesBubbleTea(t *testing.T) {
 
 // ...and the model must actually apply that test to the message.
 func TestModeReportKeepsWcWidthOnPermanentReset(t *testing.T) {
-	defer func(prev ansi.Method) { ui.WidthMethod = prev }(ui.WidthMethod)
-	ui.WidthMethod = ansi.WcWidth
+	defer func(prev ansi.Method) { markterm.WidthMethod = prev }(markterm.WidthMethod)
+	markterm.WidthMethod = ansi.WcWidth
 
 	m := &tui{
 		sess:    llm.NewSession(nil, ""),
@@ -754,11 +894,58 @@ func TestModeReportKeepsWcWidthOnPermanentReset(t *testing.T) {
 	}
 	m.layout(100, 30)
 	m.Update(tea.ModeReportMsg{Mode: ansi.ModeUnicodeCore, Value: ansi.ModePermanentlyReset})
-	if ui.WidthMethod != ansi.WcWidth {
+	if markterm.WidthMethod != ansi.WcWidth {
 		t.Fatal("a permanently-reset answer switched the layout to grapheme widths")
 	}
 	m.Update(tea.ModeReportMsg{Mode: ansi.ModeUnicodeCore, Value: ansi.ModeSet})
-	if ui.WidthMethod != ansi.GraphemeWidth {
+	if markterm.WidthMethod != ansi.GraphemeWidth {
 		t.Fatal("a set answer did not switch the layout to grapheme widths")
+	}
+}
+
+// Tab skips the sidebar while it has nothing to scroll — a stop that can do
+// nothing is a stop worth not making — and stops there once it overflows.
+func TestTabSkipsSidebarWithNothingToScroll(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 30)
+	m.focus = paneOutput
+
+	m.cycleFocus()
+	if m.focus != paneInput {
+		t.Fatalf("tab stopped on pane %d, want the prompt: the sidebar fits", m.focus)
+	}
+
+	// Enough sidebar content to overflow, and it joins the cycle again.
+	m.note = strings.Repeat("something went wrong. ", 200)
+	m.refreshSidebar()
+	m.focus = paneOutput
+	m.cycleFocus()
+	if m.focus != paneSidebar {
+		t.Fatalf("tab stopped on pane %d, want the sidebar: it overflows", m.focus)
+	}
+
+	// A terminal too narrow to draw the sidebar takes it back out.
+	m.layout(80, 30)
+	m.focus = paneOutput
+	m.cycleFocus()
+	if m.focus != paneInput {
+		t.Fatalf("tab stopped on pane %d, want the prompt: no sidebar at this width", m.focus)
+	}
+}
+
+// The wheel raises the same bar the keys do, including from the prompt, where
+// the wheel scrolls the output pane rather than anything of the prompt's own.
+func TestWheelRaisesScrollbar(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 20)
+	m.focus = paneInput
+	m.setOutput(strings.Repeat("line\n", 50))
+	if m.barActive(paneOutput) {
+		t.Fatal("the output bar is up before anything scrolled")
+	}
+
+	m.mouse(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if !m.barActive(paneOutput) {
+		t.Fatal("the wheel scrolled the output pane without raising its bar")
 	}
 }
