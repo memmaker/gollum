@@ -3,12 +3,12 @@ package main
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/cursor"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+
+	"github.com/memmaker/crash/ui"
 )
 
 // The prompt has two shapes. Most of the time it is a single row — a
@@ -48,8 +48,10 @@ func newMultiLineInput() textarea.Model {
 	ta.SetHeight(minMultilineHeight)
 	// The default cursor line paints its own background, which shows up as a
 	// block behind the placeholder. Let the terminal background through.
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	st := ta.Styles()
+	st.Focused.CursorLine = lipgloss.NewStyle()
+	st.Blurred.CursorLine = lipgloss.NewStyle()
+	ta.SetStyles(st)
 	return ta
 }
 
@@ -112,11 +114,9 @@ func (m *tui) resetInput() {
 // focusInput gives the active widget the cursor.
 func (m *tui) focusInput() {
 	if m.multiline {
-		m.multiLine.Cursor.SetMode(cursor.CursorBlink)
 		m.multiLine.Focus()
 		return
 	}
-	m.oneLine.Cursor.SetMode(cursor.CursorBlink)
 	m.oneLine.Focus()
 }
 
@@ -125,9 +125,7 @@ func (m *tui) focusInput() {
 // as two carets on screen once another pane takes focus.
 func (m *tui) blurInput() {
 	m.oneLine.Blur()
-	m.oneLine.Cursor.SetMode(cursor.CursorHide)
 	m.multiLine.Blur()
-	m.multiLine.Cursor.SetMode(cursor.CursorHide)
 }
 
 // inputView renders whichever widget is active. The multiline box gets a
@@ -151,7 +149,7 @@ func (m *tui) setInputWidth(w int) {
 	// -1: the cursor renders as an extra column past Width when it sits at
 	// line end, so reserving Width up to the full remaining space pushes it
 	// past the terminal edge.
-	m.oneLine.Width = max(w-ansi.StringWidth(m.oneLine.Prompt)-1, 1)
+	m.oneLine.SetWidth(max(w-ui.StringWidth(m.oneLine.Prompt)-1, 1))
 	m.multiLine.SetWidth(max(w-multilineBorderCols, 1))
 }
 
@@ -159,9 +157,9 @@ func (m *tui) setInputWidth(w int) {
 // height — one visual row at a time through the textarea's own up/down
 // handling, so the box scrolls to follow exactly as a single arrow key would.
 func (m *tui) pageMultiline(up bool) {
-	step := tea.KeyMsg{Type: tea.KeyDown}
+	step := tea.KeyPressMsg{Code: tea.KeyDown}
 	if up {
-		step = tea.KeyMsg{Type: tea.KeyUp}
+		step = tea.KeyPressMsg{Code: tea.KeyUp}
 	}
 	for i := 0; i < m.multiLine.Height(); i++ {
 		m.multiLine, _ = m.multiLine.Update(step)
@@ -218,7 +216,7 @@ func wrappedRows(s string, width int) int {
 	}
 	n := 0
 	for _, line := range strings.Split(s, "\n") {
-		n += max((ansi.StringWidth(line)+width-1)/width, 1)
+		n += max((ui.StringWidth(line)+width-1)/width, 1)
 	}
 	return max(n, 1)
 }

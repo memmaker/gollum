@@ -97,6 +97,37 @@ func TestStreamWithToolsSendsCallBeforeResult(t *testing.T) {
 	}
 }
 
+// A tool-calling response's trailing usage chunk arrives after the
+// ToolCalls message, on the same stream. Cancelling the request the instant
+// ToolCalls is seen used to race that chunk and drop it, undercounting every
+// tool-using turn's cost.
+func TestStreamWithToolsKeepsUsageFromToolCallTurn(t *testing.T) {
+	call := ToolCall{ID: "call_1", Function: ToolCallFunction{Name: "pick", Arguments: "{}"}}
+	p := &scriptedProvider{streams: [][]Message{
+		{
+			{Role: RoleAssistant, ToolCalls: []ToolCall{call}},
+			{Role: RoleAssistant, Usage: &Usage{TotalTokens: 42}},
+		},
+		{{Role: RoleAssistant, Content: "a cat then"}},
+	}}
+	s := NewSession(&Client{provider: p}, "")
+	s.AddTool(Tool{Type: "function", Function: ToolFunction{Name: "pick"}},
+		func(context.Context, ToolCall) (string, error) { return "cat", nil })
+
+	ch, err := s.StreamWithTools(context.Background(), "choose an animal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	if err := s.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Usage().TotalTokens; got != 42 {
+		t.Fatalf("usage = %d, want 42 (tool-call turn's usage chunk was dropped)", got)
+	}
+}
+
 // Tools are offered by default, and turning them off has to reach the wire —
 // a model that is still shown a tool will still call it.
 func TestSetToolsEnabled(t *testing.T) {

@@ -42,7 +42,10 @@ func TestToolBlockFoldExpand(t *testing.T) {
 	if strings.Contains(m.transcript.String(), longResult) {
 		t.Fatal("folded result already shows the full output")
 	}
-	b2CallBefore, b2ResultBefore := b2.callLine, b2.resultLine
+	b2CallBefore := b2.callLine
+	if b1.resultLine != -1 || b2.resultLine != -1 {
+		t.Fatal("results should stay unprinted until their block is expanded")
+	}
 
 	m.blockCursor = 0
 	m.toggleSelectedBlock()
@@ -68,9 +71,11 @@ func TestToolBlockFoldExpand(t *testing.T) {
 	if !strings.Contains(strings.Split(got, "\n")[b1.callLine], "read_file") {
 		t.Fatalf("block 1's tracked callLine %d no longer points at its call", b1.callLine)
 	}
-	if b2.callLine <= b2CallBefore || b2.resultLine <= b2ResultBefore {
-		t.Fatalf("block 2 did not shift down after block 1 expanded: callLine %d->%d, resultLine %d->%d",
-			b2CallBefore, b2.callLine, b2ResultBefore, b2.resultLine)
+	if b2.callLine <= b2CallBefore {
+		t.Fatalf("block 2 did not shift down after block 1 expanded: callLine %d->%d", b2CallBefore, b2.callLine)
+	}
+	if b2.resultLine != -1 {
+		t.Fatal("block 2's result should still be unprinted")
 	}
 	if !strings.Contains(strings.Split(got, "\n")[b2.callLine], "ls") {
 		t.Fatalf("block 2's tracked callLine %d no longer points at its call", b2.callLine)
@@ -87,6 +92,54 @@ func TestToolBlockFoldExpand(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "before\n\n") {
 		t.Fatal("content before the block was disturbed")
+	}
+	if b1.resultLine != -1 {
+		t.Fatal("re-folded block's result should be unprinted again")
+	}
+}
+
+// Back-to-back calls (both fired before either result lands, the common
+// case for a model batching independent tool calls) must not have their
+// results print out of order once they arrive — that reads as answering the
+// wrong call. Results stay hidden until their own block is expanded.
+func TestBackToBackCallsDeferResults(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), blockCursor: -1}
+	m.addToolCall(llm.ToolCall{ID: "1", Function: llm.ToolCallFunction{Name: "first"}})
+	m.addToolCall(llm.ToolCall{ID: "2", Function: llm.ToolCallFunction{Name: "second"}})
+	m.addToolResult(llm.Message{Role: llm.RoleTool, ToolCallID: "1", Content: "result one"})
+	m.addToolResult(llm.Message{Role: llm.RoleTool, ToolCallID: "2", Content: "result two"})
+
+	if got := m.transcript.String(); strings.Contains(got, "result one") || strings.Contains(got, "result two") {
+		t.Fatalf("results printed before either block was expanded:\n%s", got)
+	}
+
+	m.blockCursor = 0
+	m.toggleSelectedBlock()
+	got := m.transcript.String()
+	if !strings.Contains(got, "result one") {
+		t.Fatal("expanding block 1 should reveal its own result")
+	}
+	if strings.Contains(got, "result two") {
+		t.Fatal("expanding block 1 should not reveal block 2's result")
+	}
+}
+
+// The block-nav bar only makes sense while the output pane holds focus —
+// left behind on an unfocused pane it reads as a second, contradicting
+// selection.
+func TestHighlightBlockOnlyWhenOutputFocused(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), blockCursor: 0, focus: paneOutput}
+	m.addToolCall(llm.ToolCall{ID: "1", Function: llm.ToolCallFunction{Name: "a"}})
+
+	got := m.highlightBlock(m.transcript.String())
+	if !strings.Contains(got, "▎") {
+		t.Fatal("output pane focused: bar should be drawn")
+	}
+
+	m.focus = paneSidebar
+	got = m.highlightBlock(m.transcript.String())
+	if strings.Contains(got, "▎") {
+		t.Fatal("output pane unfocused: bar should be gone")
 	}
 }
 

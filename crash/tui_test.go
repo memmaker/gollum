@@ -6,21 +6,23 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muesli/termenv"
 
 	"github.com/memmaker/gollum/llm"
+
+	"github.com/memmaker/crash/ui"
 )
 
 // The scrollbar is the only arithmetic in the view: a thumb that leaves the
 // track, or a track of the wrong height, breaks the whole layout.
 func TestScrollbar(t *testing.T) {
-	vp := viewport.New(20, 10)
+	vp := viewport.New(viewport.WithWidth(20), viewport.WithHeight(10))
 	vp.SetContent(strings.Repeat("line\n", 5))
 	if got := strings.Count(scrollbar(vp, true), "\n") + 1; got != 10 {
 		t.Fatalf("short content: got %d rows, want 10", got)
@@ -30,7 +32,6 @@ func TestScrollbar(t *testing.T) {
 	if got := strings.Count(scrollbar(vp, true), scrollbarThumb); got != 10 {
 		t.Fatalf("short content drew %d thumb rows, want a full 10", got)
 	}
-	lipgloss.SetColorProfile(termenv.TrueColor)
 	if scrollbar(vp, true) == scrollbar(vp, false) {
 		t.Fatal("focused and unfocused scrollbars look the same")
 	}
@@ -68,10 +69,10 @@ func TestChoiceOverlay(t *testing.T) {
 		current: "openai/gpt-5-mini",
 	}
 	m.layout(100, 30)
-	plain := m.View()
+	plain := m.render()
 
 	m.openChoice("available models", []string{"openai/a", "openai/b"}, func(int) {})
-	withModal := m.View()
+	withModal := m.render()
 
 	if lipgloss.Height(plain) != lipgloss.Height(withModal) {
 		t.Fatalf("overlay changed the frame height: %d then %d",
@@ -92,7 +93,7 @@ func TestChoiceOverlay(t *testing.T) {
 	if got != -1 || m.choice != nil {
 		t.Fatalf("cancel left the overlay up (choice=%v, index=%d)", m.choice, got)
 	}
-	if m.View() != plain {
+	if m.render() != plain {
 		t.Fatal("closing the overlay did not restore the plain view")
 	}
 }
@@ -108,7 +109,7 @@ func TestChoiceFilterAndPick(t *testing.T) {
 	m.openChoice("models", options, func(i int) { picked = i })
 
 	// Type "/gem", then feed back whatever the filter command produced.
-	send := func(r rune) tea.Cmd { return m.updateChoice(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}) }
+	send := func(r rune) tea.Cmd { return m.updateChoice(tea.KeyPressMsg{Code: r, Text: string(r)}) }
 	send('/')
 	var cmd tea.Cmd
 	for _, r := range "gem" {
@@ -119,8 +120,8 @@ func TestChoiceFilterAndPick(t *testing.T) {
 		t.Fatalf("filter matched %d items, want 1", got)
 	}
 
-	m.updateChoice(tea.KeyMsg{Type: tea.KeyEnter}) // apply the filter
-	m.updateChoice(tea.KeyMsg{Type: tea.KeyEnter}) // choose the only match
+	m.updateChoice(tea.KeyPressMsg{Code: tea.KeyEnter}) // apply the filter
+	m.updateChoice(tea.KeyPressMsg{Code: tea.KeyEnter}) // choose the only match
 	if picked != 1 {
 		t.Fatalf("picked index %d, want 1 (%q)", picked, options[1])
 	}
@@ -274,7 +275,6 @@ func TestAnimBar(t *testing.T) {
 	}
 	// The highlight has to move, or it is not an animation. Tests run without
 	// a TTY, where lipgloss drops colour entirely, so ask for it explicitly.
-	lipgloss.SetColorProfile(termenv.TrueColor)
 	if animBar(40, 0, true) == animBar(40, 10, true) {
 		t.Fatal("frame 0 and frame 10 render identically")
 	}
@@ -359,9 +359,9 @@ func TestRenderContext(t *testing.T) {
 func TestPagerMouseSelection(t *testing.T) {
 	p := newPager("context", "alpha\nbeta\ngamma", 60, 20)
 
-	press := tea.MouseMsg{X: 3, Y: titleHeight, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress}
-	drag := tea.MouseMsg{X: 3, Y: titleHeight + 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion}
-	release := tea.MouseMsg{X: 3, Y: titleHeight + 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionRelease}
+	press := tea.MouseClickMsg{X: 3, Y: titleHeight, Button: tea.MouseLeft}
+	drag := tea.MouseMotionMsg{X: 3, Y: titleHeight + 1, Button: tea.MouseLeft}
+	release := tea.MouseReleaseMsg{X: 3, Y: titleHeight + 1, Button: tea.MouseLeft}
 	p.mouse(press)
 	p.mouse(drag)
 	if !p.sel.covers(panePager, 0) || !p.sel.covers(panePager, 1) {
@@ -376,12 +376,15 @@ func TestPagerMouseSelection(t *testing.T) {
 	if got != "alpha\nbeta" {
 		t.Fatalf("clipboard holds %q", got)
 	}
-	if !strings.Contains(p.view(help.New()), "copied") {
+	buf := uv.NewScreenBuffer(60, 20)
+	buf.Method = ui.WidthMethod
+	p.paint(buf, help.New(), buf.Bounds())
+	if !strings.Contains(buf.Render(), "copied") {
 		t.Fatal("the pager does not confirm the copy on screen")
 	}
 
 	// A keypress clears the highlight, as in the panes.
-	p.update(tea.KeyMsg{Type: tea.KeyDown})
+	p.update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if p.sel.set {
 		t.Fatal("a keypress left the selection up")
 	}
@@ -390,7 +393,7 @@ func TestPagerMouseSelection(t *testing.T) {
 // A pane that fits its content and has no focus shows no bar at all, but keeps
 // the column so nothing shifts when focus arrives.
 func TestScrollbarHiddenWhenIdle(t *testing.T) {
-	vp := viewport.New(10, 4)
+	vp := viewport.New(viewport.WithWidth(10), viewport.WithHeight(4))
 	vp.SetContent("one\ntwo")
 
 	hidden := scrollbar(vp, false)
@@ -475,7 +478,7 @@ func TestMenuReturnsFromPagerAndSubmenu(t *testing.T) {
 	m.openMenu()
 	context := menuEntry(t, m, "Show last context")
 	m.closeChoice(context)
-	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc}); cmd != nil {
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc}); cmd != nil {
 		t.Fatalf("esc on the pager returned a command: %v", cmd)
 	}
 	if m.page != nil {
@@ -523,7 +526,7 @@ func TestSessionHotkey(t *testing.T) {
 	m.focus = paneInput
 	m.setValue("half typed")
 
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if !m.sess.Stateless {
 		t.Fatal("ctrl+s did not turn the session off")
 	}
@@ -534,7 +537,7 @@ func TestSessionHotkey(t *testing.T) {
 		t.Fatalf("the logo does not carry the marker:\n%s", ansi.Strip(m.logo))
 	}
 
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl})
 	if m.sess.Stateless {
 		t.Fatal("ctrl+s did not turn the session back on")
 	}
@@ -558,7 +561,7 @@ func TestMultilineToggleGrowsAndShrinks(t *testing.T) {
 	m.focus = paneInput
 	m.setValue("draft")
 
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlAt}) // ctrl+space
+	m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Mod: tea.ModCtrl}) // ctrl+space
 	if !m.multiline {
 		t.Fatal("ctrl+space did not open the multiline box")
 	}
@@ -581,7 +584,7 @@ func TestMultilineToggleGrowsAndShrinks(t *testing.T) {
 	// this is the primary send key: alt+enter needs "Option as Meta" turned on
 	// in most macOS terminals, off by default, so ctrl+j is the one guaranteed
 	// to reach the app with no setup.
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
 	if got := m.value(); got != "" {
 		t.Fatalf("box still holds %q after sending", got)
 	}
@@ -632,11 +635,11 @@ func TestMultilinePageKeys(t *testing.T) {
 	m.setValue(strings.Join(lines, "\n")) // cursor ends on the last line, 19
 	height := m.multiLine.Height()
 
-	m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
 	if want := 19 - height; m.multiLine.Line() != want {
 		t.Fatalf("pgup landed on line %d, want %d (a page up from the bottom)", m.multiLine.Line(), want)
 	}
-	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	if m.multiLine.Line() != 19 {
 		t.Fatalf("pgdown landed on line %d, want back to the bottom (19)", m.multiLine.Line())
 	}
@@ -653,5 +656,109 @@ func TestEllipsisCountsWideGlyphsNotBytes(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("ellipsis %q missing truncation marker", got)
+	}
+}
+
+// The whole reason the frame is composed as cells rather than joined strings:
+// emoji whose grapheme width and wcwidth disagree must not move any column.
+// Under the old lipgloss.JoinHorizontal composition every transcript line
+// carrying one of these came out short of the width lipgloss had measured, and
+// the scrollbar and sidebar slid left along the whole row.
+func TestEmojiKeepsColumnsPut(t *testing.T) {
+	// U+26A0 + VS16 is one cell by wcwidth and two by grapheme clustering;
+	// the skin-tone thumb is four against two. Both disagreements, one line.
+	const emoji = "⚠️ warning 👍🏽 done"
+	if ansi.WcWidth.StringWidth(emoji) == ansi.GraphemeWidth.StringWidth(emoji) {
+		t.Fatal("test string no longer exercises a width disagreement")
+	}
+
+	for _, method := range []ansi.Method{ansi.WcWidth, ansi.GraphemeWidth} {
+		t.Run(fmt.Sprint(method), func(t *testing.T) {
+			defer func(prev ansi.Method) { ui.WidthMethod = prev }(ui.WidthMethod)
+			ui.WidthMethod = method
+
+			m := &tui{
+				sess:    llm.NewSession(nil, ""),
+				cfgs:    []llm.Config{{Provider: "openai", Model: "gpt-5-mini"}},
+				oneLine: newOneLineInput(), multiLine: newMultiLineInput(),
+				help:    help.New(),
+				current: "openai/gpt-5-mini",
+			}
+			const w, h = 100, 30
+			m.layout(w, h)
+			for range 40 {
+				m.transcript.WriteString(emoji + "\n")
+			}
+			m.setOutput(m.transcript.String())
+
+			lines := strings.Split(m.render(), "\n")
+			if len(lines) != h {
+				t.Fatalf("frame is %d rows, want %d", len(lines), h)
+			}
+			for i, line := range lines {
+				if got := method.StringWidth(line); got != w {
+					t.Fatalf("row %d is %d cells, want %d: %q", i, got, w, ansi.Strip(line))
+				}
+			}
+
+			// The scrollbar starts in exactly one column, immediately right of
+			// the output pane, on every row the panes occupy — measured the way
+			// the terminal measures, which is the column it actually lands in.
+			col := m.out.Width()
+			for row := animHeight; row < animHeight+m.out.Height(); row++ {
+				plain := ansi.Strip(lines[row])
+				at := strings.IndexAny(plain, scrollbarThumb+scrollbarTrack)
+				if at < 0 {
+					t.Fatalf("row %d has no scrollbar: %q", row, plain)
+				}
+				if got := method.StringWidth(plain[:at]); got != col {
+					t.Fatalf("row %d put the scrollbar in column %d, want %d: %q", row, got, col, plain)
+				}
+			}
+		})
+	}
+}
+
+// The width method has to end up wherever Bubble Tea's renderer ends up: the
+// frame is measured here and drawn there, and disagreement is the emoji drift.
+// iTerm2 answers "permanently reset" to the mode 2027 query — an answer about
+// the mode, but a no — and reading that as a yes puts the layout on grapheme
+// widths while the renderer stays on wcwidth.
+func TestGraphemeWidthsMatchesBubbleTea(t *testing.T) {
+	for _, tc := range []struct {
+		value ansi.ModeSetting
+		want  bool
+	}{
+		{ansi.ModeNotRecognized, false},
+		{ansi.ModeSet, true},
+		{ansi.ModeReset, true},
+		{ansi.ModePermanentlySet, true},
+		{ansi.ModePermanentlyReset, false}, // iTerm2 3.6
+	} {
+		if got := graphemeWidths(tc.value); got != tc.want {
+			t.Errorf("graphemeWidths(%v) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+// ...and the model must actually apply that test to the message.
+func TestModeReportKeepsWcWidthOnPermanentReset(t *testing.T) {
+	defer func(prev ansi.Method) { ui.WidthMethod = prev }(ui.WidthMethod)
+	ui.WidthMethod = ansi.WcWidth
+
+	m := &tui{
+		sess:    llm.NewSession(nil, ""),
+		cfgs:    []llm.Config{{Provider: "openai", Model: "gpt-5-mini"}},
+		oneLine: newOneLineInput(), multiLine: newMultiLineInput(),
+		help: help.New(),
+	}
+	m.layout(100, 30)
+	m.Update(tea.ModeReportMsg{Mode: ansi.ModeUnicodeCore, Value: ansi.ModePermanentlyReset})
+	if ui.WidthMethod != ansi.WcWidth {
+		t.Fatal("a permanently-reset answer switched the layout to grapheme widths")
+	}
+	m.Update(tea.ModeReportMsg{Mode: ansi.ModeUnicodeCore, Value: ansi.ModeSet})
+	if ui.WidthMethod != ansi.GraphemeWidth {
+		t.Fatal("a set answer did not switch the layout to grapheme widths")
 	}
 }

@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -75,14 +75,14 @@ func (m *tui) contentFor(p pane) string {
 func (m *tui) paneAt(x, y int) (pane, int, bool) {
 	var p pane
 	switch {
-	case x < m.out.Width:
+	case x < m.out.Width():
 		p = paneOutput
-	case m.width >= 90 && x > m.out.Width:
+	case m.width >= 90 && x > m.out.Width():
 		p = paneSidebar
 	default:
 		return 0, 0, false
 	}
-	top, height := m.paneTop(p), m.viewportFor(p).Height
+	top, height := m.paneTop(p), m.viewportFor(p).Height()
 	if y < top || y >= top+height {
 		return 0, 0, false
 	}
@@ -101,38 +101,38 @@ func (m *tui) paneTop(p pane) int {
 // mouse handles wheel scrolling and line selection. The wheel keeps its
 // meaning: it scrolls whatever has focus.
 func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
-	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+	mouse := msg.Mouse()
+	switch msg.(type) {
+	case tea.MouseWheelMsg:
 		vp := m.viewportFor(m.focus)
 		updated, cmd := vp.Update(msg)
 		*vp = updated
 		return cmd
-	}
 
-	switch msg.Action {
-	case tea.MouseActionPress:
-		if msg.Button != tea.MouseButtonLeft {
+	case tea.MouseClickMsg:
+		if mouse.Button != tea.MouseLeft {
 			return nil
 		}
-		p, row, ok := m.paneAt(msg.X, msg.Y)
+		p, row, ok := m.paneAt(mouse.X, mouse.Y)
 		if !ok {
 			return nil
 		}
 		m.focus = p
 		m.blurInput()
-		line := m.viewportFor(p).YOffset + row
+		line := m.viewportFor(p).YOffset() + row
 		m.sel = selection{pane: p, from: line, to: line, active: true, set: true}
 
-	case tea.MouseActionMotion:
+	case tea.MouseMotionMsg:
 		if !m.sel.active {
 			return nil
 		}
 		// A drag leaving the pane keeps extending along its edge instead of
 		// jumping to whatever the pointer is over.
 		vp := m.viewportFor(m.sel.pane)
-		row := min(max(msg.Y-m.paneTop(m.sel.pane), 0), vp.Height-1)
-		m.sel.to = vp.YOffset + row
+		row := min(max(mouse.Y-m.paneTop(m.sel.pane), 0), vp.Height()-1)
+		m.sel.to = vp.YOffset() + row
 
-	case tea.MouseActionRelease:
+	case tea.MouseReleaseMsg:
 		if !m.sel.active {
 			return nil
 		}

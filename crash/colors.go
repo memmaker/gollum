@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
+	gocolor "image/color"
 	"os"
 	"path/filepath"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	colorful "github.com/lucasb-eyer/go-colorful"
 	rec_files "github.com/memmaker/rec-files"
 )
@@ -97,7 +98,7 @@ func applyColors() {
 	logoTo = blendColor("logo_to")
 }
 
-func color(name string) lipgloss.Color { return lipgloss.Color(palette[name]) }
+func color(name string) gocolor.Color { return lipgloss.Color(palette[name]) }
 
 // blendColor parses the two colours the gradients interpolate between. They
 // have to be RGB rather than terminal indexes: a palette index cannot be

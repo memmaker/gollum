@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/help"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/help"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/memmaker/gollum/llm"
 )
@@ -94,7 +94,7 @@ func TestHistoryKeys(t *testing.T) {
 	m := historyTUI(t, "earlier")
 	m.focus = paneInput
 
-	up := tea.KeyMsg{Type: tea.KeyUp}
+	up := tea.KeyPressMsg{Code: tea.KeyUp}
 	m.Update(up)
 	if got := m.value(); got != "earlier" {
 		t.Fatalf("up on an empty box gave %q, want the last prompt", got)

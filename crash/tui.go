@@ -7,15 +7,16 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/cursor"
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/cursor"
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/memmaker/crash/ui"
@@ -34,6 +35,10 @@ const (
 	sidebarWidth = logoWidth + 1
 	animHeight   = 1 // the bar across the top
 	helpHeight   = 1
+
+	// wheelDelta is the rows one notch of the mouse wheel scrolls. The bubbles
+	// default of 3 overshoots on a trackpad, which sends a notch per flick.
+	wheelDelta = 1
 )
 
 type pane int
@@ -49,7 +54,7 @@ const (
 )
 
 type keymap struct {
-	send, altEnter, newlineHint, multiline, oneLineHint, next, up, down, top, bottom, quit, pick, cancel, menu, history, session key.Binding
+	send, altEnter, newlineHint, multiline, oneLineHint, next, up, down, top, bottom, quit, pick, cancel, menu, history, session, render key.Binding
 	// blockUp/blockDown/fold are shown in the output pane's help line once it
 	// holds a tool block — up/down and enter are already bound to selectBlock
 	// and toggleSelectedBlock in handleBlockKey, these exist for their help text.
@@ -70,10 +75,10 @@ var keys = keymap{
 	// Never matched against a key — shown in the multiline help line only, to
 	// say what plain enter does there since nothing else states it.
 	newlineHint: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "newline")),
-	multiline:   key.NewBinding(key.WithKeys("ctrl+@"), key.WithHelp("ctrl+space", "multiline")),
+	multiline:   key.NewBinding(key.WithKeys("ctrl+space"), key.WithHelp("ctrl+space", "multiline")),
 	// Same key as multiline — matched nowhere, shown in its help line instead,
 	// to name where it is about to send you back to.
-	oneLineHint: key.NewBinding(key.WithKeys("ctrl+@"), key.WithHelp("ctrl+space", "one-line")),
+	oneLineHint: key.NewBinding(key.WithKeys("ctrl+space"), key.WithHelp("ctrl+space", "one-line")),
 	next:        key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next pane")),
 	up:          key.NewBinding(key.WithKeys("up", "k", "pgup"), key.WithHelp("↑/pgup", "scroll up")),
 	down:        key.NewBinding(key.WithKeys("down", "j", "pgdown"), key.WithHelp("↓/pgdn", "scroll down")),
@@ -85,6 +90,8 @@ var keys = keymap{
 	// Not ctrl+m: terminals send CR for that, which is the same byte as enter.
 	menu:    key.NewBinding(key.WithKeys("ctrl+p"), key.WithHelp("ctrl+p", "menu")),
 	session: key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "session")),
+	// Pager only: swap between rendered markdown and the raw source.
+	render: key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "markdown")),
 	// Never matched against a key — the input pane reads the arrows directly.
 	// It carries them anyway because the help bar hides a binding with no keys,
 	// and the point of this one is to say the history is there at all.
@@ -151,6 +158,8 @@ type tui struct {
 	stream     <-chan llm.Message
 	stats      tokenStats // per-model token counts of every request this session
 	lastPrompt string     // user text of the running turn, kept for the cost log
+	legCalls   int        // tool calls seen since the running leg's last usage report
+	legProse   bool       // whether the running leg produced any answer content
 	turnStart  int        // byte offset in the transcript where this turn's prompt echo starts
 	note       string     // last error or status line, shown in the sidebar
 
@@ -251,7 +260,7 @@ func runInteractive(ctx context.Context, cfgs []llm.Config, model string, raw bo
 			c.close()
 		}
 	}()
-	prog = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	prog = tea.NewProgram(m)
 	if _, err := prog.Run(); err != nil {
 		die("tui:", err)
 	}
@@ -263,6 +272,20 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.layout(msg.Width, msg.Height)
+		return m, nil
+
+	case tea.ModeReportMsg:
+		// The terminal's answer to Bubble Tea's mode 2027 query, which is what
+		// switches its renderer from wcwidth to grapheme counting. We have to
+		// land on the same answer it did — a frame measured one way and drawn
+		// the other is the emoji drift — so this repeats its test exactly
+		// rather than approximating it. In particular "permanently reset"
+		// means the terminal will never do grapheme widths, which reads like an
+		// answer about the mode but is a no: iTerm2 replies 4 here.
+		if msg.Mode == ansi.ModeUnicodeCore && graphemeWidths(msg.Value) {
+			ui.WidthMethod = ansi.GraphemeWidth
+			m.layout(m.width, m.height)
+		}
 		return m, nil
 
 	case chunkMsg:
@@ -338,7 +361,7 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.mouse(msg)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.page != nil {
 			if key.Matches(msg, keys.cancel) || key.Matches(msg, keys.quit) {
 				onClose := m.page.onClose
@@ -372,14 +395,15 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, keys.cancel) && m.focus != paneInput {
 			m.focus = paneInput
 			m.focusInput()
+			m.redraw()
 			return m, nil
 		}
 		if m.focus == paneInput {
-			if msg.Type == tea.KeyShiftUp {
-				return m, m.scroll(tea.KeyMsg{Type: tea.KeyUp})
+			if msg.String() == "shift+up" {
+				return m, m.scroll(tea.KeyPressMsg{Code: tea.KeyUp})
 			}
-			if msg.Type == tea.KeyShiftDown {
-				return m, m.scroll(tea.KeyMsg{Type: tea.KeyDown})
+			if msg.String() == "shift+down" {
+				return m, m.scroll(tea.KeyPressMsg{Code: tea.KeyDown})
 			}
 			if key.Matches(msg, keys.multiline) {
 				m.toggleMultiline()
@@ -394,11 +418,11 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.multiline {
 				// A single row has no lines for the cursor to walk, so up and
 				// down always recall — there is nothing else for them to do.
-				if msg.Type == tea.KeyUp {
+				if msg.Code == tea.KeyUp {
 					m.recall(-1)
 					return m, nil
 				}
-				if msg.Type == tea.KeyDown {
+				if msg.Code == tea.KeyDown {
 					m.recall(1)
 					return m, nil
 				}
@@ -406,11 +430,11 @@ func (m *tui) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.oneLine, cmd = m.oneLine.Update(msg)
 				return m, cmd
 			}
-			if msg.Type == tea.KeyPgUp {
+			if msg.Code == tea.KeyPgUp {
 				m.pageMultiline(true)
 				return m, nil
 			}
-			if msg.Type == tea.KeyPgDown {
+			if msg.Code == tea.KeyPgDown {
 				m.pageMultiline(false)
 				return m, nil
 			}
@@ -469,7 +493,10 @@ func (m *tui) submit() tea.Cmd {
 	m.note = ""
 	m.lastPrompt = text
 	m.turnStart = m.transcript.Len()
-	m.transcript.WriteString(label.Render("> "+text) + "\n\n")
+	// Wrapped like every other line that reaches the pane. Written raw, a long
+	// prompt ran past the pane edge and the viewport hard-truncated it, which
+	// is also where an emoji-heavy prompt pushed the scrollbar out of line.
+	m.transcript.WriteString(label.Render(ui.Wrap("> "+text, max(m.out.Width(), 10))) + "\n\n")
 	m.setOutput(m.transcript.String())
 	m.out.GotoBottom()
 
@@ -493,7 +520,8 @@ func (m *tui) submit() tea.Cmd {
 func (m *tui) chunk(msg llm.Message) {
 	if msg.Usage != nil {
 		// Token counts, not an answer: nothing to draw in the transcript.
-		m.stats.addCall(m.current, m.lastPrompt, *msg.Usage)
+		m.stats.addCall(m.current, m.lastPrompt, m.legCalls, m.legProse, *msg.Usage)
+		m.legCalls, m.legProse = 0, false
 		m.refreshSidebar()
 		return
 	}
@@ -501,6 +529,7 @@ func (m *tui) chunk(msg llm.Message) {
 	switch {
 	case len(msg.ToolCalls) > 0:
 		m.flushAnswer()
+		m.legCalls += len(msg.ToolCalls)
 		for _, tc := range msg.ToolCalls {
 			m.addToolCall(tc)
 		}
@@ -512,6 +541,9 @@ func (m *tui) chunk(msg llm.Message) {
 			// before was a tool result or an earlier answer, and running into
 			// it makes the two read as one sentence.
 			m.endBlock()
+		}
+		if msg.Content != "" {
+			m.legProse = true
 		}
 		m.answer.WriteString(msg.Content)
 		m.flushSettled()
@@ -535,7 +567,7 @@ func (m *tui) flushSettled() {
 	m.answer.Reset()
 	m.answer.WriteString(rest)
 	m.speak(settled) // spoken from the markdown, before it grows ANSI
-	m.transcript.WriteString(ui.RenderMarkdown(settled, m.out.Width) + "\n\n")
+	m.transcript.WriteString(ui.RenderMarkdown(settled, m.out.Width()) + "\n\n")
 }
 
 // settledPrefix splits a partial markdown answer into the part that is final
@@ -612,7 +644,7 @@ func (m *tui) flushAnswer() {
 	}
 	m.speak(body)
 	if !m.raw {
-		body = ui.RenderMarkdown(body, m.out.Width)
+		body = ui.RenderMarkdown(body, m.out.Width())
 	}
 	m.transcript.WriteString(body + "\n\n")
 }
@@ -636,10 +668,10 @@ func (m *tui) endBlock() {
 // fixed in ui.visibleLen for the pager's scrollbar.
 func ellipsis(s string, width int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if ansi.StringWidth(s) <= width {
+	if ui.StringWidth(s) <= width {
 		return s
 	}
-	return ansi.Truncate(s, width, "…")
+	return ui.Truncate(s, "…", width)
 }
 
 func onOff(b bool) string {
@@ -687,7 +719,7 @@ func waitChunk(ch <-chan llm.Message) tea.Cmd {
 
 // updateChoice routes keys to the open overlay: enter answers, esc cancels,
 // everything else scrolls or filters the list.
-func (m *tui) updateChoice(msg tea.KeyMsg) tea.Cmd {
+func (m *tui) updateChoice(msg tea.KeyPressMsg) tea.Cmd {
 	filtering := m.choice.FilterState() == list.Filtering
 	switch {
 	case key.Matches(msg, keys.cancel) && !filtering:
@@ -720,13 +752,16 @@ func (m *tui) cycleFocus() {
 	m.focus = (m.focus + 1) % 3
 	if m.focus == paneInput {
 		m.focusInput()
-		return
+	} else {
+		m.blurInput()
 	}
-	m.blurInput()
+	// The block-nav bar only makes sense while the output pane has focus;
+	// redraw so it appears or vanishes with the change immediately.
+	m.redraw()
 }
 
 // scroll routes a key to whichever pane has focus.
-func (m *tui) scroll(msg tea.KeyMsg) tea.Cmd {
+func (m *tui) scroll(msg tea.KeyPressMsg) tea.Cmd {
 	vp := &m.out
 	if m.focus == paneSidebar {
 		vp = &m.side
@@ -778,12 +813,16 @@ func (m *tui) layout(w, h int) {
 	// resize; one scrolled back to read something earlier is left alone.
 	atBottom := m.ready && m.out.AtBottom()
 	if !m.ready {
-		m.out = viewport.New(outW, paneH)
-		m.side = viewport.New(sideW, sideH)
+		m.out = viewport.New(viewport.WithWidth(outW), viewport.WithHeight(paneH))
+		m.side = viewport.New(viewport.WithWidth(sideW), viewport.WithHeight(sideH))
+		m.out.MouseWheelDelta = wheelDelta
+		m.side.MouseWheelDelta = wheelDelta
 		m.ready = true
 	} else {
-		m.out.Width, m.out.Height = outW, paneH
-		m.side.Width, m.side.Height = sideW, sideH
+		m.out.SetWidth(outW)
+		m.out.SetHeight(paneH)
+		m.side.SetWidth(sideW)
+		m.side.SetHeight(sideH)
 	}
 	if atBottom {
 		m.out.GotoBottom()
@@ -793,7 +832,7 @@ func (m *tui) layout(w, h int) {
 	if m.multiline {
 		m.multiLine.SetHeight(inputH)
 	}
-	m.help.Width = w
+	m.help.SetWidth(w)
 	m.setOutput(m.transcript.String() + m.answer.String())
 	m.refreshSidebar()
 }
@@ -842,40 +881,107 @@ func (m *tui) refreshSidebar() {
 	// Everything folds inside the pane rather than being cut: a model slug or
 	// a path is worth reading to its end, and neither has spaces to break on,
 	// so long words break mid-word.
-	m.sideContent = ansi.Wrap(b.String(), m.side.Width, "")
+	m.sideContent = ui.Wrap(b.String(), m.side.Width())
 	m.side.SetContent(m.sel.highlight(m.sideContent, paneSidebar))
 }
 
-func (m *tui) View() string {
+// graphemeWidths reports whether a DECRPM answer for mode 2027 means the
+// terminal measures cells by grapheme cluster.
+//
+// Kept identical to the test Bubble Tea's event loop makes before switching
+// its own renderer, because the two have to agree. Note what is missing:
+// [ansi.ModePermanentlyReset] is an answer, but it is a no.
+func graphemeWidths(v ansi.ModeSetting) bool {
+	return v == ansi.ModeReset || v == ansi.ModeSet || v == ansi.ModePermanentlySet
+}
+
+func (m *tui) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	v.WindowTitle = "Crash Override"
+	return v
+}
+
+// render paints the whole screen and serialises it.
+//
+// The frame is composed as a grid of cells rather than by gluing strings side
+// by side, because the two disagree about emoji. lipgloss.JoinHorizontal pads
+// each line to a width it measures with ansi.StringWidth — hard-coded to
+// grapheme counting, no way to tell it otherwise — so on a terminal that
+// advances by wcwidth every line carrying an emoji comes out a cell short and
+// drags the scrollbar and the sidebar left with it. Placing a pane at column
+// N in a buffer cannot go wrong that way: N is an index, not the result of
+// measuring what came before. A pane that mismeasures its own contents now
+// distorts only itself, clipped at its own edge.
+func (m *tui) render() string {
 	if !m.ready {
 		return "…"
 	}
-	panes := renderPane(m.out, m.focus == paneOutput)
-	if m.width >= 90 {
-		side := renderPane(m.side, m.focus == paneSidebar)
-		if m.logo != "" {
-			side = lipgloss.JoinVertical(lipgloss.Left, m.logo, side)
-		}
-		panes = lipgloss.JoinHorizontal(lipgloss.Top, panes, side)
-	}
-	if m.page != nil {
-		return m.page.view(m.help)
-	}
-	rows := []string{animBar(m.width, m.frame, m.stream != nil), panes}
-	view := lipgloss.JoinVertical(lipgloss.Left,
-		append(rows, m.inputView(), m.helpLine())...,
-	)
-	if box := m.choiceView(); box != "" {
-		x, y := m.modalPos(box)
-		view = overlay(view, box, x, y)
-	}
-	return view
+	canvas := uv.NewScreenBuffer(m.width, m.height)
+	canvas.Method = ui.WidthMethod
+	m.paint(canvas)
+	return canvas.Render()
 }
 
-// renderPane puts a viewport next to its scrollbar. With the borders gone,
-// focus is shown by the scrollbar colour.
-func renderPane(vp viewport.Model, focused bool) string {
-	return lipgloss.JoinHorizontal(lipgloss.Top, vp.View(), scrollbar(vp, focused))
+// paint lays every region of the frame into its own rectangle of scr.
+func (m *tui) paint(scr uv.ScreenBuffer) {
+	if m.page != nil {
+		m.page.paint(scr, m.help, uv.Rect(0, 0, m.width, m.height))
+		return
+	}
+
+	y := 0
+	paint(scr, animBar(m.width, m.frame, m.stream != nil), uv.Rect(0, y, m.width, animHeight))
+	y += animHeight
+
+	paneH := m.out.Height()
+	paint(scr, m.out.View(), uv.Rect(0, y, m.out.Width(), paneH))
+	paint(scr, scrollbar(m.out, m.focus == paneOutput), uv.Rect(m.out.Width(), y, 1, paneH))
+	if m.width >= 90 {
+		x, sideY := m.out.Width()+1, y
+		// The logo is fixed above the sidebar rather than scrolling inside it.
+		if m.logo != "" {
+			logoH := lipgloss.Height(m.logo)
+			paint(scr, m.logo, uv.Rect(x, sideY, m.side.Width(), logoH))
+			sideY += logoH
+		}
+		paint(scr, m.side.View(), uv.Rect(x, sideY, m.side.Width(), m.side.Height()))
+		paint(scr, scrollbar(m.side, m.focus == paneSidebar),
+			uv.Rect(x+m.side.Width(), sideY, 1, m.side.Height()))
+	}
+	y += paneH
+
+	input := m.inputView()
+	inputH := lipgloss.Height(input)
+	paint(scr, input, uv.Rect(0, y, m.width, inputH))
+	y += inputH
+
+	paint(scr, m.helpLine(), uv.Rect(0, y, m.width, helpHeight))
+
+	// The overlay goes last so it covers whatever it lands on.
+	if box := m.choiceView(); box != "" {
+		w, h := boxSize(box)
+		x, boxY := center(m.width, m.height, w, h)
+		paint(scr, box, uv.Rect(x, boxY, w, h))
+	}
+}
+
+// paint draws an already-rendered string into one rectangle of the screen,
+// clipped to it.
+func paint(scr uv.ScreenBuffer, s string, area uv.Rectangle) {
+	uv.NewStyledString(s).Draw(scr, area)
+}
+
+// boxSize measures a rendered block the way the buffer will lay it out.
+// lipgloss.Width would answer with grapheme counts even where the terminal
+// advances by wcwidth, which puts a modal's right edge in the wrong column.
+func boxSize(s string) (w, h int) {
+	for _, line := range strings.Split(s, "\n") {
+		w = max(w, ui.StringWidth(line))
+		h++
+	}
+	return w, h
 }
 
 // Scrollbar glyphs, as crush draws them.
@@ -888,7 +994,7 @@ const (
 // how much of the content is on screen. Content that fits gets a blank column,
 // so the pane width never changes underneath it.
 func scrollbar(vp viewport.Model, focused bool) string {
-	h := vp.Height
+	h := vp.Height()
 	if h <= 0 {
 		return ""
 	}
@@ -953,7 +1059,7 @@ func (m *tui) padStatus(left string) string {
 	if m.gitStatus == "" {
 		return left
 	}
-	gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(m.gitStatus)
+	gap := m.width - ui.StringWidth(left) - ui.StringWidth(m.gitStatus)
 	if gap < 1 {
 		return left
 	}

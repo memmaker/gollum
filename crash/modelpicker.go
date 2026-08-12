@@ -6,10 +6,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/memmaker/crash/ui"
 	"github.com/memmaker/gollum/llm"
@@ -35,7 +33,7 @@ func (choiceDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	if index == m.Index() {
 		line = label.Render("▸ " + item.(choiceItem).text)
 	}
-	fmt.Fprint(w, ansi.Truncate(line, m.Width(), "…"))
+	fmt.Fprint(w, ui.Truncate(line, "…", m.Width()))
 }
 
 // maxChoiceRows caps the overlay before it swallows the screen; past this the
@@ -93,13 +91,14 @@ func (m *tui) openChoice(title string, options []string, pick func(int)) {
 	l.Title = title
 	// The list ships its own purple title bar; the palette owns that colour.
 	l.Styles.Title = titleStyle
-	// Same for the filter's green prompt and pink cursor. They have to be set
-	// on the input as well: list.New copies the styles into it once, so a later
-	// change to l.Styles alone never reaches the prompt.
-	l.Styles.FilterPrompt = accentStyle
-	l.Styles.FilterCursor = accentStyle
-	l.FilterInput.PromptStyle = accentStyle
-	l.FilterInput.Cursor.Style = accentStyle
+	// Same for the filter's green prompt and pink cursor. l.Styles.Filter is
+	// only a template — the input list.New already built is what renders, so
+	// the styles go straight on it.
+	fs := l.FilterInput.Styles()
+	fs.Focused.Prompt = accentStyle
+	fs.Blurred.Prompt = accentStyle
+	fs.Cursor.Color = color("accent")
+	l.FilterInput.SetStyles(fs)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(true)
 	l.SetFilteringEnabled(true)
@@ -137,11 +136,6 @@ func (m *tui) applyModel(e modelEntry) {
 	if err := SaveDefault(e.cfg.Provider, e.model); err != nil {
 		m.note = "could not save default model: " + err.Error()
 	}
-}
-
-// modalPos centres the overlay on screen.
-func (m *tui) modalPos(box string) (int, int) {
-	return center(m.width, m.height, lipgloss.Width(box), lipgloss.Height(box))
 }
 
 // substringFilter replaces the list's default fuzzy matcher. Fuzzy matching on
@@ -191,7 +185,7 @@ func (m *tui) toggleSession() {
 	m.saveSettings()
 	// The logo carries the state: its tagline row gains OBLIVIUM.
 	if m.logo != "" {
-		m.logo = renderLogo("CRASH", m.side.Width, m.sess.Stateless)
+		m.logo = renderLogo("CRASH", m.side.Width(), m.sess.Stateless)
 	}
 	m.transcript.WriteString(dim.Render("session "+onOff(!m.sess.Stateless)) + "\n\n")
 	m.setOutput(m.transcript.String())
@@ -269,7 +263,7 @@ func (m *tui) openMenu() {
 				renderContext(m.sess.LastRequest(), m.sess.LastRequestTools()), m.width, m.height)
 		}, false, false},
 		{"Request costs", func() {
-			m.page = newPager("token cost per request", m.stats.String(), m.width, m.height)
+			m.page = newMarkdownPager("token cost per request", m.stats.String(), m.width, m.height)
 		}, false, false},
 		{"MCPs", func() { m.openMCPMenu() }, false, true},
 		{"Tools", func() { m.openToolsMenu() }, false, true},

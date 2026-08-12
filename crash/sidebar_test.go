@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/help"
+	"charm.land/bubbles/v2/help"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/memmaker/gollum/llm"
@@ -21,8 +21,8 @@ func TestSidebarWraps(t *testing.T) {
 
 	lines := strings.Split(m.sideContent, "\n")
 	for _, l := range lines {
-		if w := ansi.StringWidth(l); w > m.side.Width {
-			t.Fatalf("line too wide (%d > %d): %q", w, m.side.Width, ansi.Strip(l))
+		if w := ansi.StringWidth(l); w > m.side.Width() {
+			t.Fatalf("line too wide (%d > %d): %q", w, m.side.Width(), ansi.Strip(l))
 		}
 	}
 	// The long slug is folded, not truncated: every x survives. Counted above

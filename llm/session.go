@@ -401,6 +401,26 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 							return
 						}
 					}
+					// tool_calls is a terminal finish_reason: only a trailing
+					// usage-only chunk can still be on the wire. Drain for it
+					// before cancelling, or cancel races the transport's own
+					// send and this request's cost silently vanishes.
+					for {
+						next, ok := s.nextChunk(streamCh)
+						if !ok {
+							break
+						}
+						if next.Usage != nil {
+							s.addUsage(*next.Usage)
+							select {
+							case outCh <- next:
+							case <-ctx.Done():
+								cancel()
+								return
+							}
+							break
+						}
+					}
 					// we need to stop current stream and start a follow-up request
 					cancel()
 					break stream

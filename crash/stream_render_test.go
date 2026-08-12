@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/help"
+	"charm.land/bubbles/v2/help"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/memmaker/gollum/llm"

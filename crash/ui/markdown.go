@@ -7,7 +7,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/x/ansi"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -315,8 +314,8 @@ func wrapIndent(s string, width int, indent string) string {
 // visibleLen counts the terminal cells a string occupies, skipping ANSI escape
 // sequences. Cells, not runes: an emoji or a CJK glyph is two columns wide, and
 // counting it as one wraps lines past the pane and shoves the scrollbar over.
-// Same measure the viewport and lipgloss use, so the layout agrees end to end.
-func visibleLen(s string) int { return ansi.StringWidth(s) }
+// Measured with [WidthMethod], the way the terminal itself measures.
+func visibleLen(s string) int { return StringWidth(s) }
 
 // PlainText reduces markdown to the prose inside it, using the same parse the
 // renderer uses rather than a second guess at the syntax: markers gone, fenced
