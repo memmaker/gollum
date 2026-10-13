@@ -3,7 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/memmaker/gollum/llm"
@@ -22,7 +26,7 @@ var envKeysByProvider = map[string][]string{
 }
 
 // keylessProviders serve locally and need no API key.
-var keylessProviders = map[string]bool{"lmstudio": true, "omniroute": true}
+var keylessProviders = map[string]bool{"lmstudio": true, "omniroute": true, "ollama": true}
 
 // configPath returns llm_model.rec from the current directory if present,
 // otherwise ~/.config/gollum/config.rec, creating a default config if needed.
@@ -113,10 +117,14 @@ func LoadConfigs() ([]llm.Config, error) {
 			continue
 		}
 		cfgs = append(cfgs, llm.Config{
-			Provider: provider,
-			APIKey:   key,
-			Model:    m["model"],
-			BaseURL:  m["base_url"],
+			Provider:        provider,
+			APIKey:          key,
+			Model:           m["model"],
+			BaseURL:         m["base_url"],
+			ServiceTier:     llm.ServiceTier(m["service_tier"]),
+			ReasoningEffort: llm.ReasoningEffort(m["reasoning_effort"]),
+			ContextLimit:    intField(m["context"]),
+			Temp:            floatField(m["temp"]),
 		})
 	}
 	if len(cfgs) == 0 {
@@ -178,10 +186,6 @@ func LoadToolConfigs() ([]ToolConfig, error) {
 	}
 	defer f.Close()
 
-	defaults := map[string]bool{
-		"user_choice": true,
-		"bash":        true,
-	}
 	seen := make(map[string]bool)
 	var out []ToolConfig
 	for _, rec := range rec_files.Read(f) {
@@ -193,12 +197,12 @@ func LoadToolConfigs() ([]ToolConfig, error) {
 		seen[name] = true
 		out = append(out, ToolConfig{
 			Name:    name,
-			Enabled: boolField(m["enabled"], defaults[name]),
+			Enabled: boolField(m["enabled"], true),
 		})
 	}
-	for name, enabled := range defaults {
+	for _, name := range builtinTools {
 		if !seen[name] {
-			out = append(out, ToolConfig{Name: name, Enabled: enabled})
+			out = append(out, ToolConfig{Name: name, Enabled: true})
 		}
 	}
 	return out, nil
@@ -254,10 +258,14 @@ func SaveMCPEnabled(name string, enabled bool) error {
 }
 
 // SaveDefault makes provider/model the default for the next run: it sets the
-// record's `model` field and moves that record first, since the first usable
-// record is what starts the session. Records for other providers keep their own
-// settings.
-func SaveDefault(provider, model string) error {
+// record's `model` and `reasoning_effort` fields and moves that record first,
+// since the first usable record is what starts the session. Records for other
+// providers keep their own settings.
+//
+// An empty effort means the model's own default, which is the absence of the
+// field rather than an empty one — writing `reasoning_effort:` with nothing
+// after it would be a value the reader then has to special-case.
+func SaveDefault(provider, model string, effort llm.ReasoningEffort) error {
 	cfgPath, err := configPath()
 	if err != nil {
 		return err
@@ -276,12 +284,12 @@ func SaveDefault(provider, model string) error {
 			ordered = append(ordered, rec)
 			continue
 		}
-		target = setField(rec, "model", model)
+		target = setEffort(setField(rec, "model", model), effort)
 	}
 	if target == nil {
 		// A provider that is configured only through the environment still gets
 		// remembered, as its own record.
-		target = rec_files.Record{{Name: "provider", Value: provider}, {Name: "model", Value: model}}
+		target = setEffort(rec_files.Record{{Name: "provider", Value: provider}, {Name: "model", Value: model}}, effort)
 	}
 	ordered = append([]rec_files.Record{target}, ordered...)
 	return writeRecsAtomically(cfgPath, ordered)
@@ -307,6 +315,15 @@ func writeRecsAtomically(path string, recs []rec_files.Record) error {
 	return os.Rename(tmp.Name(), path)
 }
 
+// setEffort writes the reasoning effort onto a record, or drops the field when
+// the effort is the model's own default — see SaveDefault.
+func setEffort(rec rec_files.Record, effort llm.ReasoningEffort) rec_files.Record {
+	if effort == "" {
+		return slices.DeleteFunc(rec, func(f rec_files.Field) bool { return f.Name == "reasoning_effort" })
+	}
+	return setField(rec, "reasoning_effort", string(effort))
+}
+
 func setField(rec rec_files.Record, name, value string) rec_files.Record {
 	for i, field := range rec {
 		if field.Name == name {
@@ -317,13 +334,38 @@ func setField(rec rec_files.Record, name, value string) rec_files.Record {
 	return append(rec, rec_files.Field{Name: name, Value: value})
 }
 
+// intField reads a plain integer config field. Anything unparseable — an
+// absent field included — is zero, which every caller already treats as
+// "not set".
+func intField(v string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// floatField reads a plain decimal config field. Anything unparseable — an
+// absent field included, or a negative number — is zero, which every caller
+// already treats as "not set".
+func floatField(v string) float64 {
+	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 func expandHome(path string) string {
-	if !strings.HasPrefix(path, "~/") {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
 		return path
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return path
+	}
+	if path == "~" {
+		return home
 	}
 	return filepath.Join(home, path[2:])
 }
@@ -345,17 +387,29 @@ func shortenHome(path string) string {
 	return path
 }
 
-// SystemPrompt returns ~/.config/gollum/system.md, or "" if absent.
+// SystemPrompt returns ~/.config/gollum/system.md behind a line naming the
+// machine it runs on. Without it a model has nothing to anchor a path to and
+// invents one from thin air.
 func SystemPrompt() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	var body []byte
+	if home, err := os.UserHomeDir(); err == nil {
+		body, _ = os.ReadFile(filepath.Join(home, ".config", "gollum", "system.md"))
 	}
-	b, err := os.ReadFile(filepath.Join(home, ".config", "gollum", "system.md"))
-	if err != nil {
-		return ""
+	return environmentLine() + "\n\n" + string(body)
+}
+
+// environmentLine is "OS: <os> - USER: <user> - CWD: <cwd>", with "?" for
+// anything the OS won't tell us.
+func environmentLine() string {
+	name := "?"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		name = u.Username
 	}
-	return string(b)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "?"
+	}
+	return fmt.Sprintf("OS: %s - USER: %s - CWD: %s", runtime.GOOS, name, cwd)
 }
 
 // env returns the first non-empty environment variable among keys.

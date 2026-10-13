@@ -31,6 +31,7 @@ type openaiReq struct {
 	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
 	Stream              bool             `json:"stream"`
 	Tools               []Tool           `json:"tools,omitempty"`
+	ToolChoice          string           `json:"tool_choice,omitempty"`
 	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
 	ServiceTier         string           `json:"service_tier,omitempty"`
 	StreamOptions       *oaStreamOptions `json:"stream_options,omitempty"`
@@ -42,10 +43,28 @@ type oaStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// toolChoice drops the field when no tools are offered: OpenAI rejects a
+// tool_choice of "required" with an empty tools list, and every caller that
+// sends plain prose leaves both empty anyway.
+func toolChoice(choice ToolChoice, tools []Tool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	return string(choice)
+}
+
 // serviceTier returns the value to put in the outgoing body, dropping it for
-// backends that are OpenAI-compatible but not OpenAI.
-func (t *openaiTransport) serviceTier(s ServiceTier) string {
+// backends that are OpenAI-compatible but not OpenAI. service_tier is
+// OpenAI's own field, so it's also dropped for any model a multi-vendor
+// router (omniroute) is about to send to a non-OpenAI backend — the router
+// names those "<vendor>/<model>", so a slash in the model marks one. The
+// plain "openai" provider's own models carry no such prefix, so this never
+// fires for it.
+func (t *openaiTransport) serviceTier(s ServiceTier, model string) string {
 	if !t.allowServiceTier {
+		return ""
+	}
+	if vendor, _, ok := strings.Cut(model, "/"); ok && vendor != "openai" {
 		return ""
 	}
 	return string(s)
@@ -101,11 +120,18 @@ func openaiReasoningEffort(e ReasoningEffort, model string) string {
 	}
 	switch e {
 	case ReasoningEffortNone:
-		if isReasoningTierModel(model) {
+		// gpt-5.6-luna rejects "minimal" outright (400: unsupported_value) and,
+		// for tool-calling requests specifically, accepts only the literal
+		// "none" — confirmed against the live API, not documented anywhere.
+		if isReasoningTierModel(model) && !strings.Contains(model, "-luna") {
 			return "minimal"
 		}
 		return "none"
-	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh:
+	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh,
+		// ollama-only names — see the ReasoningEffort constants. They reach
+		// here only from the ollama menu, since ReasoningChoices offers them
+		// nowhere else.
+		ReasoningEffortMinimal, ReasoningEffortXHigh, ReasoningEffortUltra, ReasoningEffortMax:
 		return string(e)
 	default:
 		return ""
@@ -120,9 +146,30 @@ type openaiResp struct {
 }
 
 type oaChoice struct {
-	Index        int     `json:"index"`
-	Message      Message `json:"message"`
-	FinishReason string  `json:"finish_reason"`
+	Index        int       `json:"index"`
+	Message      oaMessage `json:"message"`
+	FinishReason string    `json:"finish_reason"`
+}
+
+// oaMessage decodes a non-streamed response message. Message.Reasoning is
+// tagged json:"-" so it round-trips cleanly through requests (a provider's
+// own reasoning text is never echoed back to it), which also means it can't
+// be decoded straight off the wire — the embedding shadows it with a field
+// that actually has a "reasoning" tag, for routers (e.g. OpenRouter-alikes)
+// that put thought-summary text there.
+type oaMessage struct {
+	Message
+	Reasoning        string `json:"reasoning,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
+// reasoning is whichever of the message's two reasoning fields a backend
+// actually populated — see oaDelta.reasoning for why there are two.
+func (m oaMessage) reasoning() string {
+	if m.Reasoning != "" {
+		return m.Reasoning
+	}
+	return m.ReasoningContent
 }
 
 type oaUsage struct {
@@ -163,6 +210,21 @@ type oaDelta struct {
 	Role      string       `json:"role,omitempty"`
 	Content   string       `json:"content,omitempty"`
 	ToolCalls []oaToolCall `json:"tool_calls,omitempty"`
+	// Reasoning carries thought-summary text on routers that stream one —
+	// OpenRouter-alikes send it as "reasoning"; some others use
+	// "reasoning_content" (DeepSeek's own API and its lookalikes), so both
+	// are accepted.
+	Reasoning        string `json:"reasoning,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
+// reasoning is whichever of the delta's two reasoning fields a backend
+// actually populated.
+func (d oaDelta) reasoning() string {
+	if d.Reasoning != "" {
+		return d.Reasoning
+	}
+	return d.ReasoningContent
 }
 
 type oaToolCall struct {
@@ -194,6 +256,17 @@ func newOpenAITransport(apiKey string, timeout time.Duration) *openaiTransport {
 	}
 }
 
+// setHeaderTimeout changes how long client's transport waits for response
+// headers, in place — the transport headerTimeoutTransport built is always a
+// *http.Transport, so the assertion cannot fail for a client this package
+// constructed. Not safe against a request racing through the same client;
+// callers only reach this at a point no request is in flight.
+func setHeaderTimeout(client *http.Client, d time.Duration) {
+	client.Transport.(*http.Transport).ResponseHeaderTimeout = d
+}
+
+func (t *openaiTransport) setTimeout(d time.Duration) { setHeaderTimeout(t.client, d) }
+
 // body builds the outgoing request for a call, routing every field to the
 // parameter the target model accepts. stream also asks for the final usage
 // chunk, which is the only place token counts arrive on a streamed answer.
@@ -207,8 +280,9 @@ func (t *openaiTransport) body(req Request, stream bool) openaiReq {
 		MaxCompletionTokens: completionMax,
 		Stream:              stream,
 		Tools:               req.Tools,
+		ToolChoice:          toolChoice(req.ToolChoice, req.Tools),
 		ReasoningEffort:     openaiReasoningEffort(req.ReasoningEffort, req.Model),
-		ServiceTier:         t.serviceTier(req.ServiceTier),
+		ServiceTier:         t.serviceTier(req.ServiceTier, req.Model),
 	}
 	if stream {
 		body.StreamOptions = &oaStreamOptions{IncludeUsage: true}
@@ -259,7 +333,9 @@ func (t *openaiTransport) chat(ctx context.Context, url string, req Request) (Re
 		return Response{}, errors.New("llm: empty response")
 	}
 
-	res := Response{Message: oa.Choices[0].Message}
+	msg := oa.Choices[0].Message.Message
+	msg.Reasoning = oa.Choices[0].Message.reasoning()
+	res := Response{Message: msg}
 	if oa.Usage != nil {
 		res.Usage = oa.Usage.toUsage()
 	}
@@ -360,6 +436,15 @@ func (t *openaiTransport) stream(ctx context.Context, url string, req Request) (
 					p.content.WriteString(text)
 					select {
 					case ch <- Message{Role: RoleAssistant, Content: text}:
+					case <-ctx.Done():
+						return
+					}
+				}
+				// reasoning: a thought-summary text delta, on the routers that
+				// stream one — see oaDelta.reasoning.
+				if text := c.Delta.reasoning(); text != "" {
+					select {
+					case ch <- Message{Role: RoleAssistant, Reasoning: text}:
 					case <-ctx.Done():
 						return
 					}

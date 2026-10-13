@@ -3,9 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/memmaker/gollum/llm"
 )
 
 func TestSaveDefaultMovesProviderFirst(t *testing.T) {
@@ -16,7 +19,7 @@ func TestSaveDefaultMovesProviderFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := SaveDefault("omniroute", "auto/best-fast"); err != nil {
+	if err := SaveDefault("omniroute", "auto/best-fast", llm.ReasoningEffortLow); err != nil {
 		t.Fatal(err)
 	}
 	cfgs, err := LoadConfigs()
@@ -30,6 +33,9 @@ func TestSaveDefaultMovesProviderFirst(t *testing.T) {
 	}
 	if cfgs[0].Provider != "omniroute" || cfgs[0].Model != "auto/best-fast" {
 		t.Fatalf("default is %s/%s, want omniroute/auto/best-fast", cfgs[0].Provider, cfgs[0].Model)
+	}
+	if cfgs[0].ReasoningEffort != llm.ReasoningEffortLow {
+		t.Fatalf("reasoning effort is %q, want low", cfgs[0].ReasoningEffort)
 	}
 	if cfgs[0].BaseURL != "http://localhost:20128/v1" {
 		t.Fatalf("base_url lost: %q", cfgs[0].BaseURL)
@@ -46,7 +52,7 @@ func TestSaveDefaultMovesProviderFirst(t *testing.T) {
 	}
 
 	// A provider with no record yet gets one.
-	if err := SaveDefault("gemini", "gemini-2.0-flash"); err != nil {
+	if err := SaveDefault("gemini", "gemini-2.0-flash", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GEMINI_API_KEY", "test-key")
@@ -56,6 +62,22 @@ func TestSaveDefaultMovesProviderFirst(t *testing.T) {
 	}
 	if cfgs[0].Provider != "gemini" || cfgs[0].Model != "gemini-2.0-flash" {
 		t.Fatalf("default is %s/%s, want gemini/gemini-2.0-flash", cfgs[0].Provider, cfgs[0].Model)
+	}
+
+	// Back to the model's own default: the field goes away rather than being
+	// written empty, and the record it belonged to keeps everything else.
+	if err := SaveDefault("omniroute", "auto/best-fast", ""); err != nil {
+		t.Fatal(err)
+	}
+	written, err = os.ReadFile("llm_model.rec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(written), "reasoning_effort") {
+		t.Fatalf("an empty effort left the field behind:\n%s", written)
+	}
+	if !strings.Contains(string(written), "base_url: http://localhost:20128/v1") {
+		t.Fatalf("clearing the effort lost the rest of the record:\n%s", written)
 	}
 }
 
@@ -150,5 +172,16 @@ func TestShortenHome(t *testing.T) {
 		if got := shortenHome(in); got != want {
 			t.Errorf("shortenHome(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestSystemPromptStartsWithEnvironmentLine(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, _, _ := strings.Cut(SystemPrompt(), "\n")
+	if !strings.HasSuffix(line, " - CWD: "+cwd) || !strings.HasPrefix(line, "OS: "+runtime.GOOS+" - ") {
+		t.Fatalf("first line %q does not name %s and %s", line, runtime.GOOS, cwd)
 	}
 }

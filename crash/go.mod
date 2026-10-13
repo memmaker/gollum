@@ -15,6 +15,8 @@ require (
 	github.com/memmaker/rec-files v1.0.0
 )
 
+require github.com/OneOfOne/xxhash v1.2.8 // indirect
+
 require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect

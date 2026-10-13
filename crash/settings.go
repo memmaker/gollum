@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	rec_files "github.com/memmaker/rec-files"
 )
@@ -17,23 +18,29 @@ func sortedKeys(m map[string]string) []string { return slices.Sorted(maps.Keys(m
 // of their own in ~/.config/gollum/config.rec, tagged `settings: ui` so the
 // provider records in the same file stay untouched.
 type Settings struct {
-	SendTools  bool
-	FullWidth  bool
-	Session    bool // carry the conversation into each request
-	TTSAnswers bool
-	TTSLang    string            // which engine speaks, by key
-	TTSEngines map[string]string // language key -> engine command
+	SendTools bool
+	FullWidth bool
+	Session   bool // carry the conversation into each request
+	// AutoCompact summarizes the conversation when a request would overrun
+	// the model's context window, instead of letting the backend refuse it.
+	AutoCompact bool
+	TTSAnswers  bool
+	TTSLang     string            // which engine speaks, by key
+	TTSEngines  map[string]string // language key -> engine command
+	Timeout     time.Duration     // idle limit before a backend is considered hung
 }
 
 // defaultSettings is what a fresh install gets: tools on, output width capped,
-// answers not read out loud. Its map is never handed out — LoadSettings copies
-// it, so a config file cannot edit the defaults of the next call.
+// answers not read out loud, timeout at 2 minutes. Its map is never handed out —
+// LoadSettings copies it, so a config file cannot edit the defaults of the next call.
 var defaultSettings = Settings{
-	SendTools:  true,
-	FullWidth:  false,
-	Session:    true,
-	TTSLang:    "de",
-	TTSEngines: map[string]string{"de": "tts-de-male-kokoro", "en": "tts-en-male-kokoro"},
+	SendTools:   true,
+	FullWidth:   false,
+	Session:     true,
+	AutoCompact: true,
+	TTSLang:     "de",
+	TTSEngines:  map[string]string{"de": "tts-de-male-kokoro", "en": "tts-en-male-kokoro"},
+	Timeout:     120 * time.Second, // llm.DefaultTimeout
 }
 
 // ttsEnginePrefix marks a per-language engine field: `tts_engine_de: NAME`
@@ -78,9 +85,15 @@ func LoadSettings() Settings {
 		s.SendTools = boolField(m["send_tools"], s.SendTools)
 		s.FullWidth = boolField(m["full_width"], s.FullWidth)
 		s.Session = boolField(m["session"], s.Session)
+		s.AutoCompact = boolField(m["auto_compact"], s.AutoCompact)
 		s.TTSAnswers = boolField(m["tts_answers"], s.TTSAnswers)
 		if v := m["tts_lang"]; v != "" {
 			s.TTSLang = v
+		}
+		if v := m["timeout"]; v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				s.Timeout = d
+			}
 		}
 		for name, v := range m {
 			if lang, ok := strings.CutPrefix(name, ttsEnginePrefix); ok && lang != "" && v != "" {
@@ -116,8 +129,10 @@ func SaveSettings(s Settings) error {
 		{Name: "send_tools", Value: onOff(s.SendTools)},
 		{Name: "full_width", Value: onOff(s.FullWidth)},
 		{Name: "session", Value: onOff(s.Session)},
+		{Name: "auto_compact", Value: onOff(s.AutoCompact)},
 		{Name: "tts_answers", Value: onOff(s.TTSAnswers)},
 		{Name: "tts_lang", Value: s.TTSLang},
+		{Name: "timeout", Value: s.Timeout.String()},
 	}
 	// Sorted, so the file does not reshuffle itself on every save.
 	for _, lang := range sortedKeys(s.TTSEngines) {

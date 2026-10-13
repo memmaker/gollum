@@ -109,6 +109,7 @@ func (m *tui) mouse(msg tea.MouseMsg) tea.Cmd {
 		vp := m.viewportFor(p)
 		updated, cmd := vp.Update(msg)
 		*vp = updated
+		m.setFollow(p)
 		return tea.Batch(cmd, m.showBar(p))
 
 	case tea.MouseClickMsg:

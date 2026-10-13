@@ -1,11 +1,23 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 )
+
+// cwdLine is the working directory crash started in, home-shortened, for the
+// window title and the statusbar's right side. Empty if it cannot be
+// resolved.
+func cwdLine() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return shortenHome(cwd)
+}
 
 // gitStatusLine reports the current branch and the uncommitted diff tally
 // (lines added/removed against HEAD), for the statusbar's right side. Empty

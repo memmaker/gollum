@@ -51,6 +51,14 @@ func newMarkdownPager(title, body string, width, height int) *pager {
 	return p
 }
 
+// resize refits the pager to a new terminal size. Markdown is wrapped to the
+// viewport width, so the body is re-rendered rather than just reflowed.
+func (p *pager) resize(width, height int) {
+	p.vp.SetWidth(max(width-1, 10))
+	p.vp.SetHeight(max(height-titleHeight-1, 3))
+	p.redraw()
+}
+
 // toggleMarkdown flips between the rendered view and the raw source. Raw is
 // what you want to copy out or to read when the renderer mangles something,
 // rendered is what you want for a table.
@@ -165,6 +173,11 @@ func renderContext(msgs []llm.Message, tools []llm.Tool) string {
 		}
 		fmt.Fprintf(&b, "%s\n", label.Render(head))
 		if body := strings.TrimRight(msg.Content, "\n"); body != "" {
+			if msg.Role == "tool" {
+				if pretty := prettyJSON(body); pretty != "" {
+					body = pretty
+				}
+			}
 			fmt.Fprintf(&b, "%s\n", body)
 		}
 		for _, tc := range msg.ToolCalls {

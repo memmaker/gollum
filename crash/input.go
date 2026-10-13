@@ -25,14 +25,9 @@ const (
 	outputFloor         = 3 // rows the output pane keeps even at max multiline height
 )
 
-// inputPlaceholder hints at the slash commands from whichever box is empty.
-const inputPlaceholder = "ask something — /model, /debug, /exit"
-
 // newOneLineInput builds the default prompt.
 func newOneLineInput() textinput.Model {
-	ti := textinput.New()
-	ti.Placeholder = inputPlaceholder
-	return ti
+	return textinput.New()
 }
 
 // newMultiLineInput builds the box ctrl+space opens. Enter keeps its textarea
@@ -40,7 +35,6 @@ func newOneLineInput() textinput.Model {
 // an editor acts like one.
 func newMultiLineInput() textarea.Model {
 	ta := textarea.New()
-	ta.Placeholder = inputPlaceholder
 	ta.ShowLineNumbers = false
 	// The border already marks the box's edge; a prompt glyph on every line
 	// would just repeat that down the left side.

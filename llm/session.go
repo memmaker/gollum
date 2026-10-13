@@ -48,6 +48,19 @@ type Session struct {
 	// everything that was said while it was set.
 	Stateless bool
 
+	// ContextLimit is the model's context window in tokens, as the caller
+	// resolved it — this package has no catalogue of its own. Zero means
+	// unknown, which switches auto-compaction off however AutoCompact is set:
+	// compacting against a guessed window would throw a conversation away for
+	// no reason anyone can check.
+	ContextLimit int
+
+	// AutoCompact summarizes the conversation in place, mid-turn, once a
+	// request would cross compactThreshold of ContextLimit — rather than
+	// letting the backend reject it, which in the middle of a tool chain
+	// loses the whole turn. See compact.go.
+	AutoCompact bool
+
 	// mu guards messages and the three fields below. StreamWithTools writes them
 	// from its own goroutine while the caller reads them through History, Err,
 	// LastRequest and Usage, and not every write happens-before the channel
@@ -69,9 +82,45 @@ type Session struct {
 	// model was told it could call, not just what it was told.
 	lastTools []Tool
 
+	// calib scales approxTokens to what this backend's own tokenizer made of
+	// the last request it counted. Zero until one request has been counted —
+	// see calibrate.
+	calib float64
+
 	// usage accumulates every token count the backends reported for this
 	// session. Providers that report none leave it at zero.
 	usage Usage
+
+	// Log, when set, is told about every change to the conversation as it
+	// happens: messages appended, or — with replace true — the whole new
+	// history that just replaced the old one, after a compaction or a Clear.
+	// It is what lets a caller keep an append-only record of a session
+	// without polling History.
+	//
+	// Set it after Restore, or the transcript just restored is written back
+	// into the log it was read from. Called off the session's own lock, from
+	// whichever goroutine made the change, so an implementation that writes
+	// somewhere shared has to serialize itself.
+	Log func(msgs []Message, replace bool)
+
+	// inject carries a message a caller wants spliced into a running tool
+	// chain's next follow-up request, without disturbing the call already in
+	// flight. One slot: a second Inject before the first is picked up is
+	// refused, so the caller can fall back to queuing it instead. See Inject.
+	inject chan Message
+}
+
+// SetTimeout changes how long a turn may go without producing anything, for
+// the rest of the session. It reaches both halves of that bound: s.Timeout,
+// the idle limit this package enforces itself between chunks, and the
+// client's own transport, which is what actually waits for the first
+// response header — a client built at session start otherwise keeps
+// whatever timeout it was constructed with, deaf to this changing later.
+func (s *Session) SetTimeout(d time.Duration) {
+	s.Timeout = d
+	if s.client != nil {
+		s.client.SetTimeout(d)
+	}
 }
 
 // Usage returns the tokens this session has spent so far, summed over every
@@ -135,6 +184,15 @@ func (s *Session) appendHistory(msgs ...Message) {
 	s.mu.Lock()
 	s.messages = append(s.messages, msgs...)
 	s.mu.Unlock()
+	s.logChange(msgs, false)
+}
+
+// logChange hands a change to Log, if there is one. Never under s.mu: Log
+// writes to a file.
+func (s *Session) logChange(msgs []Message, replace bool) {
+	if s.Log != nil && len(msgs) > 0 {
+		s.Log(msgs, replace)
+	}
 }
 
 // requestBase is what a new turn's message list is built on: the transcript so
@@ -172,6 +230,7 @@ func NewSession(client *Client, systemPrompt string) *Session {
 		Timeout:             DefaultTimeout,
 		executors:           map[string]ToolExecutor{},
 		SendRegisteredTools: true,
+		inject:              make(chan Message, 1),
 	}
 	if systemPrompt != "" {
 		s.messages = append(s.messages, Message{Role: RoleSystem, Content: systemPrompt})
@@ -276,6 +335,44 @@ func (s *Session) Stream(ctx context.Context, prompt string) (<-chan Message, er
 	return outCh, nil
 }
 
+// Inject offers a message to splice into a running StreamWithTools call's next
+// follow-up request — after the tool round now in flight returns, before it
+// sends the next one. It does nothing to the call already in progress. Reports
+// false if a message is already waiting to be picked up, or if the turn ends
+// (with no further follow-up request to splice into) before this one is: the
+// caller should treat either as "runs as its own turn instead."
+func (s *Session) Inject(msg Message) bool {
+	select {
+	case s.inject <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+// DrainInject takes back a message that was never spliced in — the turn ended
+// without another follow-up request happening. Reports false once the message
+// has already been picked up by a running loop.
+func (s *Session) DrainInject() (Message, bool) {
+	select {
+	case msg := <-s.inject:
+		return msg, true
+	default:
+		return Message{}, false
+	}
+}
+
+// tryInject is the non-blocking read StreamWithTools itself uses, right after
+// a tool round's results are folded in and before the next request goes out.
+func (s *Session) tryInject() (Message, bool) {
+	select {
+	case msg := <-s.inject:
+		return msg, true
+	default:
+		return Message{}, false
+	}
+}
+
 // StreamWithTools streams assistant content while supporting tool calls mid-conversation.
 // It will stream the model's output, execute any tool calls using the session's executors,
 // send the tool results back to the model in a follow-up streaming request, and continue
@@ -304,8 +401,46 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 			merged = len(msgs)
 		}
 
+		// tryCompact goes false once compaction has stopped helping: a
+		// summary that is itself over the threshold cannot be summarized
+		// smaller, and retrying every leg would spend a call each time to
+		// send the same request anyway.
+		tryCompact := true
+
 		for {
 			offered := s.offeredTools()
+			if tryCompact && s.needsCompaction(msgs, offered) {
+				compacted, summary, err := s.compact(ctx, msgs)
+				if err != nil {
+					// Not fatal: the threshold leaves room, so the request
+					// that could not be summarized can still be attempted.
+					tryCompact = false
+					select {
+					case outCh <- Message{Role: RoleAssistant, Compacted: true, Err: err}:
+					case <-ctx.Done():
+						return
+					}
+				} else {
+					msgs = compacted
+					// The transcript becomes the summary too, or the next
+					// turn rebuilds the very history this just dropped.
+					// Safe: needsCompaction refuses Stateless sessions, so
+					// nothing is being kept for a later toggle here.
+					s.mu.Lock()
+					s.messages = append([]Message{}, compacted...)
+					s.mu.Unlock()
+					s.logChange(compacted, true)
+					merged = len(msgs)
+					if s.estimateTokens(msgs, offered) >= int(float64(s.ContextLimit)*compactThreshold) {
+						tryCompact = false
+					}
+					select {
+					case outCh <- Message{Role: RoleAssistant, Compacted: true, Content: summary}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
 			s.setLastRequest(msgs, offered)
 			req := s.request(msgs, offered)
 
@@ -403,6 +538,7 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 						}
 						if next.Usage != nil {
 							s.addUsage(*next.Usage)
+							s.calibrate(*next.Usage, req.Messages, req.Tools)
 							select {
 							case outCh <- next:
 							case <-ctx.Done():
@@ -419,6 +555,7 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 
 				if msg.Usage != nil {
 					s.addUsage(*msg.Usage)
+					s.calibrate(*msg.Usage, req.Messages, req.Tools)
 					select {
 					case outCh <- msg:
 					case <-ctx.Done():
@@ -427,8 +564,10 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 					}
 					continue
 				}
-				// regular assistant content chunk
-				if msg.Content != "" {
+				// regular assistant content chunk, or a reasoning-only one:
+				// thought-summary text arrives with no Content of its own, so
+				// testing Content alone drops it before the caller sees it.
+				if msg.Content != "" || msg.Reasoning != "" {
 					fullContent += msg.Content
 					select {
 					case outCh <- msg:
@@ -452,7 +591,19 @@ func (s *Session) StreamWithTools(ctx context.Context, prompt string) (<-chan Me
 				// finished without tool calls
 				return
 			}
-			// otherwise loop will send the tool responses back and start a new streaming request
+			// The tool round just folded is exactly where an injected message
+			// belongs: after what is already in flight, ahead of what goes
+			// out next.
+			if injMsg, ok := s.tryInject(); ok {
+				msgs = append(msgs, injMsg)
+				select {
+				case outCh <- injMsg:
+				case <-ctx.Done():
+					return
+				}
+			}
+			// otherwise loop will send the tool responses back (and any
+			// injected message) and start a new streaming request
 		}
 	}()
 	return outCh, nil
@@ -501,6 +652,16 @@ func (s *Session) nextChunk(ch <-chan Message) (Message, bool) {
 // stream still running keeps appending to the session's own copy.
 func (s *Session) History() []Message {
 	return s.snapshotHistory()
+}
+
+// EstimateTokens estimates what the conversation so far would cost as a
+// request, calibrated by this model's own tokenizer once a real request has
+// been counted. Meant for a caller that wants a context-size figure before any
+// request of its own has gone out — right after Restore, say — not for the
+// request StreamWithTools is about to send, which estimates from its own
+// message list directly.
+func (s *Session) EstimateTokens() int {
+	return s.estimateTokens(s.snapshotHistory(), s.offeredTools())
 }
 
 func (s *Session) SendWithTools(ctx context.Context, prompt string, userTools []Tool, userExec ToolExecutor) (Response, error) {
@@ -560,10 +721,26 @@ func (s *Session) SendWithTools(ctx context.Context, prompt string, userTools []
 
 func (s *Session) Clear() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(s.messages) > 0 && s.messages[0].Role == RoleSystem {
 		s.messages = s.messages[:1]
 	} else {
 		s.messages = nil
 	}
+	kept := append([]Message{}, s.messages...)
+	s.mu.Unlock()
+	// A cleared session still has to be recorded as a replacement, or a log
+	// read back later replays the conversation /new threw away. The system
+	// prompt is what is left, and that is enough for Log to write the reset
+	// marker even when nothing else survives.
+	if s.Log != nil {
+		s.Log(kept, true)
+	}
+}
+
+// Restore adds a transcript from an earlier run to this session, after
+// whatever system prompt it was built with. The saved messages are the
+// conversation only: the system prompt comes from the current config, which
+// may have been edited since the file was written.
+func (s *Session) Restore(msgs []Message) {
+	s.appendHistory(msgs...)
 }

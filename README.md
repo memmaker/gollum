@@ -57,8 +57,8 @@ the branch and uncommitted diff tally on its right.
 composited over the panes — nothing drops back to the plain terminal.
 
 The main menu holds the settings that outlive a run: send tools, full output
-width, session, TTS for answers and TTS language, plus the last request's
-context and the per-request token costs. Toggles stay on screen when flipped,
+width, session, auto-compaction, TTS for answers and TTS language, plus the
+last request's context and the per-request token costs. Toggles stay on screen when flipped,
 so the menu doubles as the display, and MCPs and Tools open submenus that list
 every MCP server and built-in tool with its current state.
 
@@ -68,7 +68,8 @@ escaped, so one prompt stays one line in the file.
 
 Type `/model` to switch provider (the choice is saved as the default),
 `/debug` to show tool arguments and results in full instead of one-line
-previews, or `/exit` to quit. Tool calls are drawn in the transcript where they
+previews, `/compress` to summarize the conversation now, `/context 64000` to
+tell crash how big this model's context window is, or `/exit` to quit. Tool calls are drawn in the transcript where they
 happened, with each result under its call. Flags: `-model` (override the configured model), `-raw` (skip
 markdown rendering), `-timeout` (give up when a backend sends nothing for this
 long), `-b` (batch mode).
@@ -82,6 +83,38 @@ either way, so turning the session back on resumes with everything that was
 said while it was off. While it is off the logo carries `OBLIVIUM` next to its
 tagline, because a conversation that is not being remembered should not look
 like one that is.
+
+### Auto-compaction
+
+A long chain of tool calls fills a context window from the inside, and the
+backend's answer to a request that no longer fits is to refuse the whole turn.
+With auto-compaction on — the default — crash summarizes the conversation
+itself before that happens: once a request would take more than 95% of the
+window, it goes out one more time with the compaction instructions in place of
+the system prompt, and the summary that comes back replaces the history. The
+next request carries the system prompt, that summary, and the note telling the
+model the rest is gone and to ask rather than guess. The transcript on screen
+is untouched — only what is sent shrinks — and the line where it happened says
+so. `/compress` does the same thing on demand.
+
+The window itself is looked up in three places, first answer winning:
+
+1. `~/.config/gollum/context-sizes.map`, one `provider/model::tokens` line
+   each — what `/context 64000` writes, and where a models.dev lookup is
+   cached;
+2. a `context:` field on the provider's record in the config file, for a
+   gateway or a local server whose served window is a deployment choice;
+3. models.dev, which knows the published models.
+
+With none of the three able to answer, auto-compaction stays off: the sidebar
+has no percentage to show and nothing gets thrown away on a guess. `/context`
+with no argument says which number is in force and where it came from.
+
+The threshold is checked against an estimate — bytes over a per-model ratio
+that is recalibrated from every token count a backend reports — so it tracks
+what the real tokenizer does with code and non-English text instead of
+assuming four characters to the token. Tool schemas count towards it too;
+with a few MCP servers connected they are not the small part.
 
 ### Speaking answers
 
@@ -99,7 +132,8 @@ kokoro, and any other key works the same way.
 ### Config
 
 Config lives in `./llm_model.rec`, else `~/.config/gollum/config.rec` — one
-record per provider, fields `provider`, `model`, `base_url`, `api_key_file`.
+record per provider, fields `provider`, `model`, `base_url`, `api_key_file`,
+`context` (the context window its models serve, when no catalogue knows it).
 API keys are read from the provider's environment variables first.
 `~/.config/gollum/system.md`, if present, is the system prompt.
 
@@ -111,6 +145,7 @@ settings: ui
 send_tools: on
 full_width: off
 session: on
+auto_compact: on
 tts_answers: off
 tts_lang: de
 tts_engine_de: tts-de-male-kokoro
@@ -127,8 +162,11 @@ command: npx
 args: -y @modelcontextprotocol/server-filesystem /tmp
 ```
 
-Each built-in tool carries its own toggle record, tagged `tool:`; `user_choice`
-and `bash` both start enabled on a fresh config:
+Each built-in tool carries its own toggle record, tagged `tool:`. Every one of
+them starts enabled on a fresh config: `user_choice`, `bash`, `web_search`, and
+the six hashline file tools — `read`, `patch`, `write`, `find_block`,
+`remove_file` and `rename_file` — which are the hashline MCP server's tools
+built in, so that editing files needs no server at all:
 
 ```
 tool: bash

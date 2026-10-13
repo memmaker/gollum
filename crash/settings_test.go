@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestMain gives the whole test binary a home of its own. Several tests reach
@@ -47,6 +48,7 @@ func TestSettingsRoundTripKeepsProviders(t *testing.T) {
 		TTSAnswers: true,
 		TTSLang:    "en",
 		TTSEngines: map[string]string{"de": "tts-de-female-kokoro", "en": "tts-en-male-kokoro"},
+		Timeout:    90 * time.Second,
 	}
 	if err := SaveSettings(want); err != nil {
 		t.Fatalf("SaveSettings: %v", err)

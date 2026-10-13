@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"time"
 )
 
 // Default endpoints of the OpenAI-compatible backends. They differ in the URL
@@ -35,6 +36,8 @@ func newOpenAICompatProvider(cfg Config, defaultURL string, allowServiceTier boo
 		baseURL:   baseURL,
 	}
 }
+
+func (p *openAICompatProvider) SetTimeout(d time.Duration) { p.transport.setTimeout(d) }
 
 func (p *openAICompatProvider) url() string {
 	return p.baseURL + "/chat/completions"

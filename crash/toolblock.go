@@ -53,8 +53,12 @@ func (m *tui) blockFull(b *toolBlock) bool {
 	return m.debug || !b.folded
 }
 
-func (m *tui) renderToolCall(tc llm.ToolCall, full bool) string {
-	head := toolStyle.Render("⚒ " + tc.Function.Name)
+func (m *tui) renderToolCall(tc llm.ToolCall, full, isErr bool) string {
+	style := toolStyle
+	if isErr {
+		style = errStyle
+	}
+	head := style.Render("⚒ " + tc.Function.Name)
 	if !full {
 		args := ellipsis(strings.TrimSpace(tc.Function.Arguments), max(m.out.Width()-markterm.StringWidth(tc.Function.Name)-6, 10))
 		return head + " " + dim.Render(args)
@@ -70,7 +74,7 @@ func (m *tui) renderToolCall(tc llm.ToolCall, full bool) string {
 func (m *tui) renderToolResult(msg llm.Message, full bool) string {
 	body := strings.TrimSpace(msg.Content)
 	style := dim
-	if strings.HasPrefix(body, "error:") {
+	if resultIsErr(msg) {
 		style = errStyle
 	}
 	if !full {
@@ -79,12 +83,18 @@ func (m *tui) renderToolResult(msg llm.Message, full bool) string {
 	return style.Render("  ↳ " + body)
 }
 
+// resultIsErr reports whether a tool result reads as an error, the same test
+// its render and its call's head colour both key off.
+func resultIsErr(msg llm.Message) bool {
+	return strings.HasPrefix(strings.TrimSpace(msg.Content), "error:")
+}
+
 // addToolCall appends a folded call line to the transcript and starts
 // tracking it as a block.
 func (m *tui) addToolCall(tc llm.ToolCall) {
 	b := &toolBlock{call: tc, folded: true, resultLine: -1}
 	b.callLine = strings.Count(m.transcript.String(), "\n")
-	text := m.renderToolCall(tc, m.blockFull(b))
+	text := m.renderToolCall(tc, m.blockFull(b), false)
 	b.callLines = strings.Count(text, "\n") + 1
 	m.transcript.WriteString(text + "\n")
 	m.blocks = append(m.blocks, b)
@@ -102,6 +112,11 @@ func (m *tui) addToolResult(msg llm.Message) {
 	b := m.pendingBlock(msg.ToolCallID)
 	if b != nil {
 		b.result, b.hasResult = msg, true
+		if resultIsErr(msg) {
+			newCall := m.renderToolCall(b.call, m.blockFull(b), true)
+			m.spliceLine(b.callLine, b.callLines, newCall)
+			b.callLines = strings.Count(newCall, "\n") + 1
+		}
 	}
 	if b != nil && !m.debug {
 		return
@@ -138,7 +153,7 @@ func (m *tui) toggleSelectedBlock() {
 	b := m.blocks[m.blockCursor]
 	b.folded = !b.folded
 
-	newCall := m.renderToolCall(b.call, m.blockFull(b))
+	newCall := m.renderToolCall(b.call, m.blockFull(b), b.hasResult && resultIsErr(b.result))
 	m.spliceLine(b.callLine, b.callLines, newCall)
 	b.callLines = strings.Count(newCall, "\n") + 1
 

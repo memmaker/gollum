@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/viewport"
@@ -948,4 +949,387 @@ func TestWheelRaisesScrollbar(t *testing.T) {
 	if !m.barActive(paneOutput) {
 		t.Fatal("the wheel scrolled the output pane without raising its bar")
 	}
+}
+
+// The sidebar's tokens block carries the generation rate under the call
+// counter, and a leg's rate is measured from the chunks the model produced.
+func TestSidebarShowsTokenRate(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 30)
+	m.current = "ollama/qwen3-coder:q8_0"
+
+	m.chunk(llm.Message{Role: llm.RoleAssistant, Content: "hello"})
+	m.chunk(llm.Message{Role: llm.RoleAssistant, Content: " there"})
+	m.chunk(llm.Message{Usage: &llm.Usage{InputTokens: 7, OutputTokens: 2, TotalTokens: 9}})
+
+	if _, _, ok := m.stats.rates(); !ok {
+		t.Fatal("no rate recorded for a leg that streamed chunks")
+	}
+	side := ansi.Strip(m.sideContent)
+	calls := strings.Index(side, "1 calls")
+	rate := strings.Index(side, "tok/s")
+	if calls < 0 || rate < 0 {
+		t.Fatalf("sidebar is missing the call counter or the rate:\n%s", side)
+	}
+	if rate < calls {
+		t.Errorf("rate sits above the call counter:\n%s", side)
+	}
+}
+
+// /timeout retimes the idle guard for the rest of the session: a local model
+// that thinks for minutes before its first token outlives the default.
+func TestSetTimeout(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 30)
+	m.sess.Timeout = llm.DefaultTimeout
+
+	m.setTimeout("5m")
+	if m.sess.Timeout != 5*time.Minute {
+		t.Fatalf("timeout = %s, want 5m", m.sess.Timeout)
+	}
+	if !strings.Contains(ansi.Strip(m.transcript.String()), "timeout 5m0s") {
+		t.Errorf("the new timeout was not reported:\n%s", ansi.Strip(m.transcript.String()))
+	}
+
+	// Junk leaves the session alone and says so.
+	m.setTimeout("banana")
+	if m.sess.Timeout != 5*time.Minute {
+		t.Errorf("an unparseable duration changed the timeout to %s", m.sess.Timeout)
+	}
+	if m.note == "" {
+		t.Error("an unparseable duration reported nothing")
+	}
+
+	// Zero is not "expire immediately": nextChunk reads it as no limit.
+	m.setTimeout("0")
+	if m.sess.Timeout != 0 {
+		t.Errorf("timeout = %s, want 0", m.sess.Timeout)
+	}
+	if !strings.Contains(ansi.Strip(m.transcript.String()), "timeout off") {
+		t.Error("zero was not reported as off")
+	}
+}
+
+// Scrolling the output pane down to its last line asks the view to ride along
+// with the stream; scrolling back up lets go again.
+func TestFollowsStreamAfterScrollToBottom(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 20)
+	m.setOutput(strings.Repeat("line\n", 50))
+
+	if m.follow {
+		t.Fatal("the pane follows the stream before anything was scrolled")
+	}
+	m.scroll(tea.KeyPressMsg{Code: 'G', Text: "G", Mod: tea.ModShift})
+	if !m.follow {
+		t.Fatal("a scroll that landed on the last line did not start following")
+	}
+
+	// New content while following pulls the view down with it.
+	m.setOutput(strings.Repeat("line\n", 80))
+	if !m.out.AtBottom() {
+		t.Fatalf("content arrived while following and the view stayed at offset %d", m.out.YOffset())
+	}
+
+	m.scroll(tea.KeyPressMsg{Code: 'g', Text: "g"})
+	if m.follow {
+		t.Fatal("scrolling back to the top kept following the stream")
+	}
+	off := m.out.YOffset()
+	m.setOutput(strings.Repeat("line\n", 120))
+	if m.out.YOffset() != off {
+		t.Fatalf("content arrived after following stopped and moved the view to %d, want %d", m.out.YOffset(), off)
+	}
+}
+
+// A new prompt drops any following the last turn was doing, so it lands at the
+// top of the pane instead of being dragged along by the answer.
+func TestSubmitStopsFollowing(t *testing.T) {
+	client, err := llm.New(llm.Config{Provider: "openai", APIKey: "x", BaseURL: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &tui{ctx: context.Background(), sess: llm.NewSession(client, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(), raw: true}
+	m.layout(100, 20)
+	m.transcript.WriteString(strings.Repeat("old\n", 50))
+	m.follow = true
+
+	m.setValue("what now")
+	m.submit()
+
+	if m.follow {
+		t.Fatal("submitting a prompt left the pane following the stream")
+	}
+	want := strings.Count(m.transcript.String()[:m.turnStart], "\n")
+	if m.out.YOffset() != want {
+		t.Fatalf("the new prompt sits at offset %d, want %d (top of the pane)", m.out.YOffset(), want)
+	}
+}
+
+// A tool-calling leg arrives as one aggregated chunk, so its first and last
+// chunk are the same instant. Dividing its argument tokens by that gap is
+// what reported rates in the hundreds of millions; a leg that was never
+// really timed now reports no rate at all.
+func TestToolCallLegReportsNoRate(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 30)
+	m.current = "ollama/qwen3-coder:q8_0"
+
+	m.chunk(llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{
+		ID: "1", Function: llm.ToolCallFunction{Name: "bash", Arguments: `{"cmd":"ls -la"}`},
+	}}})
+	m.chunk(llm.Message{Usage: &llm.Usage{InputTokens: 400, OutputTokens: 90, TotalTokens: 490}})
+
+	if last, _, ok := m.stats.rates(); ok {
+		t.Fatalf("a single-chunk tool leg was timed at %.0f tok/s", last)
+	}
+}
+
+// The window opens on the first chunk, so what that chunk carried was
+// generated before it and must not be charged to it: a backend that buffers
+// most of an answer into its first chunk cannot inflate the rate with tokens
+// the clock never saw.
+func TestRateExcludesTheFirstChunk(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(100, 30)
+	m.current = "ollama/qwen3-coder:q8_0"
+
+	// 900 characters buffered up front, 100 streamed after.
+	m.chunk(llm.Message{Role: llm.RoleAssistant, Content: strings.Repeat("a", 900)})
+	m.chunk(llm.Message{Role: llm.RoleAssistant, Content: strings.Repeat("b", 100)})
+	m.legStart = m.legEnd.Add(-time.Second) // one second of measurable window
+	m.chunk(llm.Message{Usage: &llm.Usage{InputTokens: 10, OutputTokens: 1000, TotalTokens: 1010}})
+
+	last, _, ok := m.stats.rates()
+	if !ok {
+		t.Fatal("no rate recorded for a leg with a measurable window")
+	}
+	// A tenth of the characters arrived inside the window, so a tenth of the
+	// tokens are what it produced — not all 1000.
+	if last < 90 || last > 110 {
+		t.Fatalf("rate %.0f tok/s, want ~100: the first chunk's tokens were charged to the window", last)
+	}
+}
+
+// A session restored from disk has to show up in the output pane, not just
+// in the model's own history — that only happens once layout knows the pane
+// width, on the first resize.
+func TestReplayRestoredHistory(t *testing.T) {
+	m := &tui{
+		sess:    llm.NewSession(nil, ""),
+		cfgs:    []llm.Config{{Provider: "openai", Model: "gpt-5-mini"}},
+		oneLine: newOneLineInput(), multiLine: newMultiLineInput(),
+		help:    help.New(),
+		current: "openai/gpt-5-mini",
+		pendingRestore: []llm.Message{
+			{Role: llm.RoleUser, Content: "what time is it"},
+			{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCall{
+				{ID: "1", Function: llm.ToolCallFunction{Name: "clock", Arguments: "{}"}},
+			}},
+			{Role: llm.RoleTool, ToolCallID: "1", Name: "clock", Content: "noon"},
+			{Role: llm.RoleAssistant, Content: "it is noon"},
+		},
+	}
+	if m.pendingRestore == nil {
+		t.Fatal("setup: pendingRestore is nil")
+	}
+	m.layout(100, 30) // first resize: this is what triggers the replay
+
+	if m.pendingRestore != nil {
+		t.Fatal("pendingRestore should be cleared after replay")
+	}
+	got := m.transcript.String()
+	for _, want := range []string{"what time is it", "clock", "it is noon"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("transcript missing %q:\n%s", want, got)
+		}
+	}
+	if len(m.blocks) != 1 {
+		t.Fatalf("expected one tool block from the restored call, got %d", len(m.blocks))
+	}
+	if !m.blocks[0].hasResult {
+		t.Fatal("restored tool call has no result attached")
+	}
+	// A second resize must not replay the history again.
+	before := m.transcript.String()
+	m.layout(90, 25)
+	if strings.Count(m.transcript.String(), "restored") != strings.Count(before, "restored") {
+		t.Fatal("history replayed twice")
+	}
+}
+
+// /compress is a round trip to the backend like any other, and before it was
+// run as a turn it looked like the command had done nothing at all: no bar,
+// no clock, no way to cancel, and a prompt typed meanwhile went into a
+// history that was about to be replaced.
+func TestCompressRunsAsATurn(t *testing.T) {
+	// A client pointing nowhere: the call fails immediately, which is all this
+	// test needs — the turn is started and ended either way.
+	client, err := llm.New(llm.Config{Provider: "openai", APIKey: "x", BaseURL: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := llm.NewSession(client, "")
+	sess.Restore([]llm.Message{{Role: llm.RoleUser, Content: "hi"}})
+	m := &tui{ctx: context.Background(), sess: sess, oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New(), raw: true}
+	m.layout(80, 20)
+
+	if cmd := m.runText("/compress"); cmd == nil {
+		t.Fatal("/compress scheduled nothing: no chunk wait, no animation tick")
+	}
+	if m.stream == nil {
+		t.Fatal("/compress left the session idle: no bar, no clock, no interrupt binding")
+	}
+	if m.turnCancel == nil {
+		t.Fatal("/compress cannot be interrupted")
+	}
+	if strings.TrimSpace(ansi.Strip(animBar(20, 0, m.stream != nil))) == "" {
+		t.Error("the bar is blank while a compression runs")
+	}
+	if !strings.Contains(ansi.Strip(m.transcript.String()), "> /compress") {
+		t.Error("/compress echoed nothing into the transcript")
+	}
+
+	for range m.stream { //nolint:revive // draining is the point
+	}
+	m.finishTurn()
+	if m.stream != nil {
+		t.Error("the stream outlived the turn")
+	}
+	if m.sess.Err() == nil {
+		t.Error("a compression that failed left nothing for finishTurn to report")
+	}
+
+	// A second one on top of a running turn would rewrite the history that
+	// turn is streaming against.
+	m.stream = make(chan llm.Message)
+	if cmd := m.startCompress(); cmd != nil {
+		t.Error("/compress started a second compression while a turn was running")
+	}
+}
+
+// A model's list of answers is a guess, so every tool question ends on an
+// option that hands the prompt back to the user. Picking it does not answer
+// the tool — the next line typed does.
+func TestUserChoiceTypeSomething(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(80, 24)
+
+	reply := make(chan string, 1)
+	m.openAsk(askMsg{question: "which animal?", options: []string{"cat", "dog"}, reply: reply})
+
+	if got := len(m.choice.Items()); got != 3 {
+		t.Fatalf("overlay has %d options, want the two offered plus %q", got, typeYourOwn)
+	}
+	last := m.choice.Items()[2].(choiceItem)
+	if last.text != typeYourOwn {
+		t.Fatalf("last option = %q, want %q", last.text, typeYourOwn)
+	}
+
+	m.closeChoice(last.idx)
+	if m.choice != nil {
+		t.Error("the overlay stayed up over the prompt it handed control to")
+	}
+	if m.focus != paneInput {
+		t.Error("focus did not move to the prompt")
+	}
+	select {
+	case <-reply:
+		t.Fatal("the tool was answered before anything was typed")
+	default:
+	}
+
+	m.setValue("an axolotl")
+	m.submit()
+	select {
+	case got, ok := <-reply:
+		if !ok || got != "an axolotl" {
+			t.Fatalf("tool got (%q, %v), want the typed answer", got, ok)
+		}
+	default:
+		t.Fatal("the typed line never reached the waiting tool")
+	}
+	if m.askReply != nil {
+		t.Error("the prompt is still pointed at a tool that already has its answer")
+	}
+}
+
+// An offered option answers the tool directly, and a cancel is not an empty
+// answer — the tool has to be able to tell them apart.
+func TestUserChoicePickAndCancel(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(80, 24)
+
+	reply := make(chan string, 1)
+	m.openAsk(askMsg{question: "which animal?", options: []string{"cat", "dog"}, reply: reply})
+	m.closeChoice(1)
+	if got := <-reply; got != "dog" {
+		t.Fatalf("tool got %q, want dog", got)
+	}
+
+	reply = make(chan string, 1)
+	m.openAsk(askMsg{question: "which animal?", options: []string{"cat"}, reply: reply})
+	m.closeChoice(-1)
+	if got, ok := <-reply; ok {
+		t.Fatalf("a cancel delivered %q instead of closing the channel", got)
+	}
+}
+
+// ctrl+x has to reach a tool waiting on a typed answer: there is no overlay
+// left on screen to escape from.
+func TestInterruptReleasesWaitingTool(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(80, 24)
+
+	reply := make(chan string, 1)
+	m.openAsk(askMsg{question: "which animal?", options: []string{"cat"}, reply: reply})
+	m.closeChoice(1) // typeYourOwn
+	m.interruptTurn()
+	if got, ok := <-reply; ok {
+		t.Fatalf("interrupt delivered %q instead of cancelling the tool", got)
+	}
+	if m.askReply != nil {
+		t.Error("the prompt is still pointed at a cancelled tool")
+	}
+}
+
+// A cancelled tool call withdraws its own question: leaving the overlay up
+// would offer answers that reach nobody. A cancel that arrives late must not
+// take a newer question down with it.
+func TestCancelledAskWithdrawsTheQuestion(t *testing.T) {
+	m := &tui{sess: llm.NewSession(nil, ""), oneLine: newOneLineInput(), multiLine: newMultiLineInput(), help: help.New()}
+	m.layout(80, 24)
+
+	reply := make(chan string, 1)
+	m.openAsk(askMsg{question: "which animal?", options: []string{"cat"}, reply: reply})
+	m.cancelAsk(reply)
+	if m.choice != nil {
+		t.Error("the overlay outlived the tool call that asked it")
+	}
+	if m.asking != nil || m.askReply != nil {
+		t.Error("a cancelled question is still outstanding")
+	}
+	// Nothing is sent back: the tool call that asked has already given up on
+	// the answer, and closing the channel would be a second cancel for a
+	// caller that is no longer there to read it.
+	select {
+	case got := <-reply:
+		t.Errorf("withdrawing a question answered it with %q", got)
+	default:
+	}
+
+	// A newer question, and the old cancel arriving after it.
+	newer := make(chan string, 1)
+	m.openAsk(askMsg{question: "which colour?", options: []string{"red"}, reply: newer})
+	m.cancelAsk(reply)
+	if m.choice == nil {
+		t.Fatal("a stale cancel tore down the question that replaced it")
+	}
+	m.closeChoice(0)
+	if got := <-newer; got != "red" {
+		t.Fatalf("newer question answered %q, want red", got)
+	}
+
+	// And after the answer, its own cancel finds nothing left to do.
+	m.cancelAsk(newer)
 }

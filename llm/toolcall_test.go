@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // scriptedProvider replays one canned stream per request, so a tool round trip
@@ -16,6 +17,8 @@ type scriptedProvider struct {
 func (p *scriptedProvider) Chat(context.Context, Request) (Response, error) {
 	return Response{}, nil
 }
+
+func (p *scriptedProvider) SetTimeout(time.Duration) {}
 
 func (p *scriptedProvider) Stream(_ context.Context, req Request) (<-chan Message, error) {
 	p.seen = append(p.seen, req.Messages)

@@ -137,3 +137,19 @@ func TestGeminiStreamUsageOnce(t *testing.T) {
 		t.Fatalf("usage = %+v, want %+v", got[0], want)
 	}
 }
+
+func TestBuildGeminiReqToolChoice(t *testing.T) {
+	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "roll"}}}
+
+	g := buildGeminiReq(Request{Tools: tools, ToolChoice: ToolChoiceRequired})
+	if g.ToolConfig == nil || g.ToolConfig.FunctionCallingConfig.Mode != "ANY" {
+		t.Fatalf("required tool choice should map to mode ANY, got %+v", g.ToolConfig)
+	}
+
+	if g := buildGeminiReq(Request{Tools: tools}); g.ToolConfig != nil {
+		t.Fatalf("unset tool choice should send no toolConfig, got %+v", g.ToolConfig)
+	}
+	if g := buildGeminiReq(Request{ToolChoice: ToolChoiceRequired}); g.ToolConfig != nil {
+		t.Fatalf("no tools means no toolConfig, got %+v", g.ToolConfig)
+	}
+}

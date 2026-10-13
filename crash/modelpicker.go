@@ -4,14 +4,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	markterm "github.com/memmaker/gollum/mark-term"
 	"github.com/memmaker/gollum/llm"
+	markterm "github.com/memmaker/gollum/mark-term"
 )
 
 // choiceItem is one line in the overlay list. It carries the caller's index,
@@ -103,6 +104,58 @@ func listModels(ctx context.Context, cfgs []llm.Config) tea.Cmd {
 	}
 }
 
+// typeYourOwn is the option every tool question ends on. A model offering a
+// list has guessed at what the answers are, and the one the user actually
+// wants is regularly not among them — without this the only ways out were to
+// pick a wrong answer or cancel the tool call outright.
+const typeYourOwn = "Type something..."
+
+// openAsk puts a tool's question on screen, always with typeYourOwn last.
+// Picking it closes the overlay and points the prompt at the waiting tool
+// instead of at the model: the next line submitted is the answer.
+func (m *tui) openAsk(msg askMsg) {
+	options := append(append([]string{}, msg.options...), typeYourOwn)
+	m.asking = msg.reply
+	m.openChoice(msg.question, options, func(i int) {
+		switch {
+		case i < 0:
+			// Closed without a value: the tool call was cancelled, and a
+			// cancel has to be distinguishable from an empty answer.
+			m.asking = nil
+			close(msg.reply)
+		case i == len(options)-1:
+			// Still outstanding — the question has only moved from the
+			// overlay to the prompt.
+			m.askReply = msg.reply
+			m.note = "type your answer: " + msg.question
+			m.focus = paneInput
+			m.focusInput()
+			m.refreshSidebar()
+		default:
+			m.asking = nil
+			msg.reply <- msg.options[i]
+		}
+	})
+}
+
+// cancelAsk takes a withdrawn question off the screen: the tool call that
+// asked it has been cancelled and is no longer listening. Only if that
+// question is still the one outstanding — a cancel that arrives after the
+// answer, or after a newer question replaced this one, has nothing to do.
+//
+// The overlay is dropped rather than closed: closing it would run the pick
+// callback and answer a tool that has already given up.
+func (m *tui) cancelAsk(reply chan string) {
+	if m.asking != reply {
+		return
+	}
+	m.asking, m.askReply = nil, nil
+	m.choice, m.onChoice = nil, nil
+	m.note = ""
+	m.refreshSidebar()
+	m.redraw()
+}
+
 // openChoice puts a titled list overlay on screen and remembers what to do
 // with the answer. pick is called with the chosen index, or -1 on cancel.
 func (m *tui) openChoice(title string, options []string, pick func(int)) {
@@ -167,9 +220,99 @@ func (m *tui) applyModel(e modelEntry) {
 	}
 	m.sess.SetClient(client)
 	m.sess.Model = e.model
+	m.sess.ServiceTier = e.cfg.ServiceTier
 	m.current = e.cfg.Provider + "/" + e.model
-	if err := SaveDefault(e.cfg.Provider, e.model); err != nil {
+	m.log.note("model " + m.current)
+	// The effort travels with the provider record, so switching models picks
+	// up whatever was last chosen there — minus anything the new model has no
+	// use for, which is how a level saved for one ollama model stops being
+	// sent to another whose template never accepted it.
+	m.sess.ReasoningEffort = validEffort(e.cfg.Provider, e.model, e.cfg.ReasoningEffort)
+	// The window belongs to the model, so it is re-resolved here rather than
+	// carried over from whatever was current before.
+	m.refreshContextLimit()
+	if err := SaveDefault(e.cfg.Provider, e.model, m.sess.ReasoningEffort); err != nil {
 		m.note = "could not save default model: " + err.Error()
+	}
+}
+
+// validEffort keeps an effort only when the target provider/model actually
+// offers it. The config file is hand-editable and a saved effort outlives the
+// model it was chosen for, so both can name a level this model would reject.
+func validEffort(provider, model string, effort llm.ReasoningEffort) llm.ReasoningEffort {
+	if effort == "" || slices.Contains(llm.ReasoningChoices(provider, model), effort) {
+		return effort
+	}
+	return ""
+}
+
+// reasoningChoices lists the reasoning-effort values the current model
+// actually respects — empty when it has none worth showing, which hides both
+// the menu entry and the sidebar label.
+func (m *tui) reasoningChoices() []llm.ReasoningEffort {
+	provider, model, _ := strings.Cut(m.current, "/")
+	return llm.ReasoningChoices(provider, model)
+}
+
+// reasoningLabel renders a ReasoningEffort the way the menu and sidebar show
+// it. The zero value means "provider/model default", not "off".
+func reasoningLabel(e llm.ReasoningEffort) string {
+	switch e {
+	case llm.ReasoningEffortNone:
+		return "None"
+	case llm.ReasoningEffortLow:
+		return "Low"
+	case llm.ReasoningEffortMedium:
+		return "Medium"
+	case llm.ReasoningEffortHigh:
+		return "High"
+	case llm.ReasoningEffortMinimal:
+		return "Minimal"
+	case llm.ReasoningEffortXHigh:
+		return "Extra high"
+	case llm.ReasoningEffortUltra:
+		return "Ultra"
+	case llm.ReasoningEffortMax:
+		return "Max"
+	default:
+		return "Default"
+	}
+}
+
+// openReasoningMenu offers the reasoning-effort values the current model
+// supports. Only called once reasoningChoices is known non-empty.
+func (m *tui) openReasoningMenu() {
+	// The zero value leads: it sends no reasoning field at all, which is the
+	// only way back to the model's own default once an explicit level has
+	// been picked — and on an ollama model whose template defaults to a level
+	// no request can name (see llm.ReasoningChoices), it is the only way to
+	// reach that level at all.
+	choices := append([]llm.ReasoningEffort{""}, m.reasoningChoices()...)
+	labels := make([]string, len(choices))
+	for i, c := range choices {
+		labels[i] = reasoningLabel(c)
+	}
+	m.openChoice("reasoning effort", labels, func(i int) {
+		if i >= 0 {
+			m.sess.ReasoningEffort = choices[i]
+			m.saveEffort(choices[i])
+		}
+		m.refreshSidebar()
+	})
+}
+
+// saveEffort persists a chosen effort next to the model it was chosen for, and
+// keeps the loaded configs in step so switching away to another model and back
+// returns to this effort rather than to the one loaded at startup.
+func (m *tui) saveEffort(effort llm.ReasoningEffort) {
+	provider, model, _ := strings.Cut(m.current, "/")
+	for i := range m.cfgs {
+		if m.cfgs[i].Provider == provider {
+			m.cfgs[i].ReasoningEffort = effort
+		}
+	}
+	if err := SaveDefault(provider, model, effort); err != nil {
+		m.note = "could not save reasoning effort: " + err.Error()
 	}
 }
 
@@ -199,12 +342,14 @@ func substringFilter(term string, targets []string) []list.Rank {
 // about, but not worth stopping for.
 func (m *tui) saveSettings() {
 	if err := SaveSettings(Settings{
-		SendTools:  m.sess.SendRegisteredTools,
-		FullWidth:  markterm.MaxWidth == 0,
-		Session:    !m.sess.Stateless,
-		TTSAnswers: m.ttsOn,
-		TTSLang:    m.ttsLang,
-		TTSEngines: m.ttsEngines,
+		SendTools:   m.sess.SendRegisteredTools,
+		FullWidth:   markterm.MaxWidth == 0,
+		Session:     !m.sess.Stateless,
+		AutoCompact: m.sess.AutoCompact,
+		TTSAnswers:  m.ttsOn,
+		TTSLang:     m.ttsLang,
+		TTSEngines:  m.ttsEngines,
+		Timeout:     m.sess.Timeout,
 	}); err != nil {
 		m.note = "could not save settings: " + err.Error()
 	}
@@ -228,21 +373,24 @@ func (m *tui) toggleSession() {
 	m.refreshSidebar()
 }
 
+// menuItem is one row of the main menu. stay keeps the menu up after do()
+// runs: a toggle is something you flip and check, and reopening the menu by
+// hand for that is a chore. owns marks an entry whose do() fully manages the
+// choice overlay from here on, including finding its own way back to this
+// menu — the generic stay/page/choice dispatch in openMenu assumes a
+// one-shot picker, which does not fit a submenu that stays open across
+// repeated toggles.
+type menuItem struct {
+	label string
+	do    func()
+	stay  bool
+	owns  bool
+}
+
 // openMenu shows the main menu: entries that carry their own state render it,
 // so the list doubles as the display.
 func (m *tui) openMenu() {
-	// stay keeps the menu up after the entry ran: a toggle is something you
-	// flip and check, and reopening the menu by hand for that is a chore.
-	// owns marks an entry whose do() fully manages the choice overlay from
-	// here on, including finding its own way back to this menu — the generic
-	// stay/page/choice dispatch below assumes a one-shot picker, which does
-	// not fit a submenu that stays open across repeated toggles.
-	entries := []struct {
-		label string
-		do    func()
-		stay  bool
-		owns  bool
-	}{
+	entries := []menuItem{
 		{"Send tools: " + onOff(m.sess.SendRegisteredTools), func() {
 			m.sess.SendRegisteredTools = !m.sess.SendRegisteredTools
 			m.saveSettings()
@@ -262,6 +410,13 @@ func (m *tui) openMenu() {
 			m.out.GotoBottom()
 		}, true, false},
 		{"Session: " + onOff(!m.sess.Stateless), m.toggleSession, true, false},
+		{"Auto-compaction: " + onOff(m.sess.AutoCompact), func() {
+			m.sess.AutoCompact = !m.sess.AutoCompact
+			m.saveSettings()
+			m.transcript.WriteString(dim.Render(m.contextLine()) + "\n\n")
+			m.setOutput(m.transcript.String())
+			m.out.GotoBottom()
+		}, true, false},
 		{"TTS for answers: " + onOff(m.ttsOn), func() {
 			if !m.ttsOn {
 				// Checked now, not at the first answer: a missing engine
@@ -302,6 +457,11 @@ func (m *tui) openMenu() {
 		}, false, false},
 		{"MCPs", func() { m.openMCPMenu() }, false, true},
 		{"Tools", func() { m.openToolsMenu() }, false, true},
+	}
+	if len(m.reasoningChoices()) > 0 {
+		entries = append(entries, menuItem{
+			"Set reasoning: " + reasoningLabel(m.sess.ReasoningEffort), m.openReasoningMenu, false, false,
+		})
 	}
 	labels := make([]string, len(entries))
 	for i, e := range entries {
@@ -447,8 +607,11 @@ func (m *tui) openToolsMenu() {
 // by a live MCP client, so the Tools menu covers both without needing its
 // own copy of what each MCP server advertised.
 func (m *tui) toolMenuNames() []string {
-	names := []string{"user_choice", "bash"}
-	seen := map[string]bool{"user_choice": true, "bash": true}
+	names := append([]string(nil), builtinTools...)
+	seen := map[string]bool{}
+	for _, n := range builtinTools {
+		seen[n] = true
+	}
 	for _, c := range m.mcpClients {
 		for _, t := range c.tools {
 			if !seen[t.Name] {

@@ -38,6 +38,13 @@ func newCopilotProvider(cfg Config) *copilotProvider {
 	}
 }
 
+func (p *copilotProvider) SetTimeout(d time.Duration) {
+	p.mu.Lock()
+	p.timeout = d
+	p.mu.Unlock()
+	setHeaderTimeout(p.client, d)
+}
+
 func (p *copilotProvider) getToken(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	if p.cached != "" && time.Now().Unix() < p.expiresAt-120 {

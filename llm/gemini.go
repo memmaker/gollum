@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 const defaultGeminiBaseURL = "https://generativelanguage.googleapis.com/v1beta"
@@ -37,6 +38,8 @@ func newGeminiProvider(cfg Config) *geminiProvider {
 		client: &http.Client{Transport: headerTimeoutTransport(cfg.timeout())},
 	}
 }
+
+func (p *geminiProvider) SetTimeout(d time.Duration) { setHeaderTimeout(p.client, d) }
 
 func (p *geminiProvider) modelName(req Request) string {
 	if req.Model != "" {
@@ -65,6 +68,10 @@ type geminiPart struct {
 	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
 	ThoughtSignature string                  `json:"thoughtSignature,omitempty"`
+	// Thought marks a part as thinking-process text rather than the answer
+	// itself. Only present when the request asked for it — see
+	// geminiThinkingConfig.IncludeThoughts.
+	Thought bool `json:"thought,omitempty"`
 }
 
 type geminiFunctionCall struct {
@@ -86,22 +93,28 @@ type geminiConfig struct {
 
 type geminiThinkingConfig struct {
 	ThinkingBudget int `json:"thinkingBudget"`
+	// IncludeThoughts asks Gemini to send its thought summaries back as
+	// parts marked "thought": true, instead of just the token count. Only
+	// meaningful when thinking is actually enabled (budget != 0).
+	IncludeThoughts bool `json:"includeThoughts,omitempty"`
 }
 
 // geminiThinkingBudget maps our provider-agnostic enum to a Gemini thinking
 // token budget. Gemini has no named tiers, only a budget in tokens (0 disables
 // thinking entirely; -1 lets the model decide dynamically), so Low/Medium/High
-// are approximated with fixed budgets rather than exact equivalents.
+// are approximated with fixed budgets rather than exact equivalents. Thinking
+// is on whenever it isn't explicitly disabled, so thought summaries are asked
+// for right along with it.
 func geminiThinkingBudget(e ReasoningEffort) *geminiThinkingConfig {
 	switch e {
 	case ReasoningEffortNone:
 		return &geminiThinkingConfig{ThinkingBudget: 0}
 	case ReasoningEffortLow:
-		return &geminiThinkingConfig{ThinkingBudget: 1024}
+		return &geminiThinkingConfig{ThinkingBudget: 1024, IncludeThoughts: true}
 	case ReasoningEffortMedium:
-		return &geminiThinkingConfig{ThinkingBudget: 8192}
+		return &geminiThinkingConfig{ThinkingBudget: 8192, IncludeThoughts: true}
 	case ReasoningEffortHigh:
-		return &geminiThinkingConfig{ThinkingBudget: -1}
+		return &geminiThinkingConfig{ThinkingBudget: -1, IncludeThoughts: true}
 	default:
 		return nil
 	}
@@ -118,10 +131,22 @@ type geminiFnDecl struct {
 }
 
 type geminiReq struct {
-	Contents          []geminiContent `json:"contents"`
-	SystemInstruction *geminiContent  `json:"systemInstruction,omitempty"`
-	GenerationConfig  geminiConfig    `json:"generationConfig,omitempty"`
-	Tools             []geminiTool    `json:"tools,omitempty"`
+	Contents          []geminiContent   `json:"contents"`
+	SystemInstruction *geminiContent    `json:"systemInstruction,omitempty"`
+	GenerationConfig  geminiConfig      `json:"generationConfig,omitempty"`
+	Tools             []geminiTool      `json:"tools,omitempty"`
+	ToolConfig        *geminiToolConfig `json:"toolConfig,omitempty"`
+}
+
+// geminiToolConfig carries Gemini's spelling of tool_choice: mode "ANY" is
+// OpenAI's "required" (the model must call some declared function), "AUTO"
+// the default. Sent only when the caller asked for a constraint.
+type geminiToolConfig struct {
+	FunctionCallingConfig geminiFnCallConfig `json:"functionCallingConfig"`
+}
+
+type geminiFnCallConfig struct {
+	Mode string `json:"mode"`
 }
 
 type geminiCandidate struct {
@@ -231,6 +256,9 @@ func buildGeminiReq(req Request) geminiReq {
 		}
 		if len(fns) > 0 {
 			g.Tools = []geminiTool{{FunctionDeclarations: fns}}
+			if req.ToolChoice == ToolChoiceRequired {
+				g.ToolConfig = &geminiToolConfig{FunctionCallingConfig: geminiFnCallConfig{Mode: "ANY"}}
+			}
 		}
 	}
 
@@ -248,6 +276,8 @@ func geminiRespToMessage(c geminiCandidate) Message {
 	if err := json.Unmarshal(c.Content.Parts, &parts); err == nil {
 		for _, p := range parts {
 			switch {
+			case p.Thought && p.Text != "":
+				msg.Reasoning += p.Text
 			case p.Text != "":
 				msg.Content += p.Text
 			case p.FunctionCall != nil:
@@ -420,7 +450,7 @@ func (p *geminiProvider) Stream(ctx context.Context, req Request) (<-chan Messag
 			}
 
 			msg := geminiRespToMessage(gr.Candidates[0])
-			if msg.Content != "" || len(msg.ToolCalls) > 0 {
+			if msg.Content != "" || msg.Reasoning != "" || len(msg.ToolCalls) > 0 {
 				select {
 				case ch <- msg:
 				case <-ctx.Done():
